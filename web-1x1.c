@@ -1,8 +1,3 @@
-/* 
- * test_server.c - A simple server that sends back the IP addresses of both endpoints
- * usage: test_server <port>
- */
-
 #include <stdio.h>
 #include <unistd.h>
 #include <stdlib.h>
@@ -19,7 +14,8 @@
 #include <arpa/inet.h>
 #include <poll.h>
 #include <errno.h>
-
+#include <openssl/ssl.h>
+#include <openssl/err.h>
 #include <sys/uio.h>
 
 #ifdef __linux__
@@ -62,23 +58,27 @@
 #define BUFSIZE 1024
 
 // Constants
-#define DEFAULT_PORT "8080"   // Default service name or port number
-#define MAXCONNQLEN  3        // Max # of connection requests to queue
-#define MAX_TCP_SOCKETS  2    // One TCP socket for IPv4 and one for IPv6
-#define MAX_UDP_SOCKETS  2    // One UDP socket for IPv4 and one for IPv6
-#define CLI_OPTS    "v"       // Command line options
+#define DEFAULT_HTTP_PORT "8080"   // Default service name or port number
+#define DEFAULT_HTTPS_PORT "8443"  // Default service name or port number
+#define MAXCONNQLEN  256        // Max # of connection requests to queue
+#define MAX_HTTP_SOCKETS  2   // One HTTP socket for IPv4 and one for IPv6
+#define MAX_HTTPS_SOCKETS  2  // One HTTPS socket for IPv4 and one for IPv6
+#define CLI_OPTS    "vp:s:"   // Command line options
 #define INVALID_DESC -1       // Invalid file descriptor
 
+// crypto material files
+char cert_file[] = "cert.pem";
+char key_file []= "key.pem";
 
 // Handy boolean type
 typedef enum { false = 0, true } boolean;
 
 // Globals
-char        hostBfr[ NI_MAXHOST ];   // For use w/getnameinfo(3)
-char        srvBfr[ NI_MAXHOST ];    // For use w/getnameinfo(3)
-char        servBfr[ NI_MAXSERV ];   // For use w/getnameinfo(3)
-char        srvportBfr[ NI_MAXSERV ];// For use w/getnameinfo(3)
-
+char hostBfr[NI_MAXHOST];   // For use w/getnameinfo(3)
+char srvBfr[NI_MAXHOST];    // For use w/getnameinfo(3)
+char servBfr[NI_MAXSERV];   // For use w/getnameinfo(3)
+char srvportBfr[NI_MAXSERV];// For use w/getnameinfo(3)
+char server_hostname[NI_MAXHOST]; // to store server name
 const char *execName;        // Executable name
 boolean     verbose = false; // Verbose mode?
 
@@ -89,15 +89,18 @@ int sendto_from(int socket, void *buffer, size_t bufferLen, int flags,
 	       struct sockaddr *clientAddr, socklen_t *clientLen,
 	       struct sockaddr *srvAddr, socklen_t *srvLen, uint *ifindex);
   
-int  openSocket(const char *service, const char *protocol,
-                      int desc[], size_t *descSize);
+int  openSocket(const char *service, int desc[], size_t *descSize);
 
-void web_1x1png(int tcpSocket[], size_t tcpSocketSize,
-            int udpSocket[], size_t udpSocketSize);
+void web_1x1png(int http_Socket[], size_t http_SocketSize,
+            int https_Socket[], size_t https_SocketSize);
 
-void print_http_headers(int newSckt);
+void gen_http_headers(char *buffer, int *length, char *date);
 
-void send_png(int newSckt);
+void get_png(char *buffer, int *length);
+
+void verbose_info(int socket, struct sockaddr *sadr, socklen_t sadrLen);
+
+void log_write(char *date, char secure, char *timestamp);
 
 // Macro to terminate the program if a system call error occurs,
 // printing errno before exiting
@@ -110,74 +113,47 @@ void send_png(int newSckt);
      }                                                        \
   } while (false)
 
-
 // Usage message
 void usage(const char * execName) {
-   fprintf( stderr, "Usage: %s [-v] [service]\n", execName );
+   fprintf( stderr, "Usage: %s [-v] [-p <http_port>] [-s <https_port]\n", execName );
    exit(1);
 }
 
-/******************************************************************************
-* Function: main
-*
-* Description:
-*    Simple server that binds on TCP and UDP, IPv4 and IPv6
-*    On IPv6 listens on all addresses of a whole prefix
-*    Sends back text with the addresses of both endpoints
-*
-* Parameters:
-*    argc and argv
-*
-* Return Values:
-*    Should run forever, exit if it can't create sockets
-******************************************************************************/
-int main(int argc, char *argv[])
+void init_openssl()
+{ 
+  SSL_load_error_strings();	
+  OpenSSL_add_ssl_algorithms();
+}
+
+SSL_CTX *create_context()
 {
-  int         opt;
-  const char *port   = DEFAULT_PORT;
-  int         tcpSocket[ MAX_TCP_SOCKETS ];     /* Array of TCP socket descriptors. */
-  size_t      tcpSocketSize = MAX_TCP_SOCKETS;  /* Size of tcpSocket (# of elements).   */
-  int         udpSocket[ MAX_UDP_SOCKETS ];     /* Array of UDP socket descriptors. */
-  size_t      udpSocketSize = MAX_UDP_SOCKETS;  /* Size of udpSocket (# of elements).   */
+  const SSL_METHOD *method;
+  SSL_CTX *ctx;
 
-  // Set the program name (w/o directory prefix).
-  execName = strrchr( argv[ 0 ], '/' );
-  execName = execName == NULL  ?  argv[ 0 ]  :  execName + 1;
-
-  // Process command options.
-  opterr = 0;   // Turns off "invalid option" error messages
-  while ( ( opt = getopt( argc, argv, CLI_OPTS ) ) >= 0 ) {
-    switch ( opt ) {
-      case 'v':   // Verbose mode
-        verbose = true;
-        break;
-      default:
-        usage(execName);
-    }  // End SWITCH on command option
-  }  // End WHILE processing options
-  // Process command line arguments.
-  switch ( argc - optind ) {
-    case 0:  break;
-    case 1:  port = argv[ optind ]; break;
-    default:  usage(execName);
-  }
-  // Open both a TCP and UDP socket, for each of IPv4 & IPv6
-  if ((openSocket( port, "tcp", tcpSocket, &tcpSocketSize) < 0) ||
-      (openSocket( port, "udp", udpSocket, &udpSocketSize) < 0))
-  {
+  method = SSLv23_server_method();
+  ctx = SSL_CTX_new(method);
+  if (!ctx) {
+    perror("Unable to create SSL context");
+    ERR_print_errors_fp(stderr);
     exit(1);
   }
-  // Run the "echo" server.
-  if ((tcpSocketSize > 0) || (udpSocketSize > 0)) {
-    web_1x1png(tcpSocket, tcpSocketSize, udpSocket, udpSocketSize);
-  }
+  return ctx;
+}
 
-  // web_1x1png() never returns, but socket creation might fail
-  if (verbose) {
-    fprintf( stderr, "Couldn't open sockets, bailing.\n");
+void configure_context(SSL_CTX *ctx)
+{
+  SSL_CTX_set_ecdh_auto(ctx, 1);
+
+  /* Set the key and cert */
+  if (SSL_CTX_use_certificate_file(ctx, cert_file, SSL_FILETYPE_PEM) <= 0) {
+    ERR_print_errors_fp(stderr);
+    exit(1);
   }
-  return 0;
-}  // End main()
+  if (SSL_CTX_use_PrivateKey_file(ctx, key_file, SSL_FILETYPE_PEM) <= 0 ) {
+    ERR_print_errors_fp(stderr);
+    exit(1);
+  }
+}
 
 //Set socket options to listen on unbound IPv6 addresses
 int set_sock_opts(int socket) {
@@ -492,8 +468,6 @@ int sendto_from(int socket, void *buffer, size_t bufferLen, int flags,
 * Parameters:
 *    port  - Pointer to a character string representing the well-known port
 *               on which to listen (can be a service name or a decimal number).
-*    protocol - Pointer to a character string representing the transport layer
-*               protocol (only "tcp" or "udp" are valid).
 *    desc     - Pointer to an array into which the socket descriptors are
 *               placed when opened.
 *    descSize - This is a value-result parameter.  On input, it contains the
@@ -506,203 +480,176 @@ int sendto_from(int socket, void *buffer, size_t bufferLen, int flags,
 *    0 on success, -1 on error.
 ******************************************************************************/
 int openSocket( const char *port,
-                     const char *protocol,
                      int         desc[ ],
-                     size_t     *descSize )
-{
-   struct addrinfo *ai;
-   int              aiErr;
-   struct addrinfo *aiHead;
-   struct addrinfo  hints    = { .ai_flags  = AI_PASSIVE,    /* Server mode. */
-                                 .ai_family = PF_UNSPEC };   /* IPv4 or IPv6 */
-   size_t           maxDescs = *descSize;
-   int err;
-   /*
-   ** Initialize output parameters.  When the loop completes, *descSize is 0.
-   */
-   while ( *descSize > 0 )
-   {
-      desc[ --( *descSize ) ] = INVALID_DESC;
-   }
-   /*
-   ** Check which protocol is selected (only TCP and UDP are valid).
-   */
-   if ( strcmp( protocol, "tcp" ) == 0 )        /* TCP protocol.     */
-   {
-      hints.ai_socktype = SOCK_STREAM;
-      hints.ai_protocol = IPPROTO_TCP;
-   }
-   else if ( strcmp( protocol, "udp" ) == 0 )   /* UDP protocol.     */
-   {
-      hints.ai_socktype = SOCK_DGRAM;
-      hints.ai_protocol = IPPROTO_UDP;
-   }
-   /*
-   ** Look up the service's well-known port number.  Notice that NULL is being
-   ** passed for the 'node' parameter, and that the AI_PASSIVE flag is set in
-   ** 'hints'.  Thus, the program is requesting passive address information.
-   ** The network address is initialized to :: (all zeros) for IPv6 records, or
-   ** 0.0.0.0 for IPv4 records.
-   */
-   if ( ( aiErr = getaddrinfo( NULL,
-                               port,
-                               &hints,
-                               &aiHead ) ) != 0 )
-   {
-      fprintf( stderr,
-               "line %d: ERROR - %s.\n",
-               __LINE__, gai_strerror( aiErr ) );
-      return -1;
-   }
-   /*
-   ** For each of the address records returned, attempt to set up a passive
-   ** socket.
-   */
-   for ( ai = aiHead;
-         ( ai != NULL ) && ( *descSize < maxDescs );
-         ai = ai->ai_next )
-   {
-      if ( verbose )
-      {
-         /*
-         ** Display the current address info.   Start with the protocol-
-         ** independent fields first.
-         */
-         fprintf( stderr,
-                  "Setting up a passive socket based on the "
-                  "following address info:\n"
-                  "   ai_flags     = 0x%02X\n"
-                  "   ai_family    = %d (PF_INET = %d, PF_INET6 = %d)\n"
-                  "   ai_socktype  = %d (SOCK_STREAM = %d, SOCK_DGRAM = %d)\n"
-                  "   ai_protocol  = %d (IPPROTO_TCP = %d, IPPROTO_UDP = %d)\n"
-                  "   ai_addrlen   = %d (sockaddr_in = %lu, "
-                  "sockaddr_in6 = %lu)\n",
-                  ai->ai_flags,
-                  ai->ai_family,
-                  PF_INET,
-                  PF_INET6,
-                  ai->ai_socktype,
-                  SOCK_STREAM,
-                  SOCK_DGRAM,
-                  ai->ai_protocol,
-                  IPPROTO_TCP,
-                  IPPROTO_UDP,
-                  ai->ai_addrlen,
-                  sizeof( struct sockaddr_in ),
-                  sizeof( struct sockaddr_in6 ) );
-         /*
-         ** Now display the protocol-specific formatted socket address.  Note
-         ** that the program is requesting that getnameinfo(3) convert the
-         ** host & service into numeric strings.
-         */
-         getnameinfo( ai->ai_addr,
-                      ai->ai_addrlen,
-                      hostBfr,
-                      sizeof( hostBfr ),
-                      servBfr,
-                      sizeof( servBfr ),
-                      NI_NUMERICHOST | NI_NUMERICSERV );
-         switch ( ai->ai_family )
-         {
-            case PF_INET:   /* IPv4 address record. */
-            {
-               struct sockaddr_in *p = (struct sockaddr_in*) ai->ai_addr;
-               fprintf( stderr,
-                        "   ai_addr      = sin_family:   %d (AF_INET = %d, "
-                        "AF_INET6 = %d)\n"
-                        "                  sin_addr:     %s\n"
-                        "                  sin_port:     %s\n",
-                        p->sin_family,
-                        AF_INET,
-                        AF_INET6,
-                        hostBfr,
-                        servBfr );
-               break;
-            }  /* End CASE of IPv4. */
-            case PF_INET6:   /* IPv6 address record. */
-            {
-               struct sockaddr_in6 *p = (struct sockaddr_in6*) ai->ai_addr;
-               fprintf( stderr,
-                        "   ai_addr      = sin6_family:   %d (AF_INET = %d, "
-                        "AF_INET6 = %d)\n"
-                        "                  sin6_addr:     %s\n"
-                        "                  sin6_port:     %s\n"
-                        "                  sin6_flowinfo: %d\n"
-                        "                  sin6_scope_id: %d\n",
-                        p->sin6_family,
-                        AF_INET,
-                        AF_INET6,
-                        hostBfr,
-                        servBfr,
-                        p->sin6_flowinfo,
-                        p->sin6_scope_id );
-               break;
-            }  /* End CASE of IPv6. */
-            default:   // Not IPv4 and not IPv6 ??
-            {
-               freeaddrinfo( aiHead );
-               return -1;
-             }  // End of Default
-         }  /* End SWITCH on protocol family. */
-      }  /* End IF verbose mode. */
-      /*
-      ** Create a socket using the info in the addrinfo structure.
-      */
-      CHECK( desc[*descSize] = socket( ai->ai_family, ai->ai_socktype, ai->ai_protocol ) );
-      if ( strcmp( protocol, "udp" ) == 0 )   /* UDP protocol.     */
-      {
-        CHECK ( set_sock_opts(desc[*descSize]) ); 
-      } else {
-        CHECK( setsockopt( desc[ *descSize ],
-                         SOL_SOCKET, SO_REUSEADDR,
-                         &(int){ 1 }, sizeof(int) ) );
-      }
-      
-      /*
-      ** Here is the code that prevents "IPv4 mapped addresses", as discussed
-      ** in Section 22.1.3.1.  If an IPv6 socket was just created, then set the
-      ** IPV6_V6ONLY socket option.
-      */
-      if ( ai->ai_family == PF_INET6 )
-      {
+                     size_t     *descSize ) {
+  struct addrinfo *ai;
+  int              aiErr;
+  struct addrinfo *aiHead;
+  struct addrinfo  hints    = { .ai_flags  = AI_PASSIVE,    /* Server mode. */
+                               .ai_family = PF_UNSPEC };   /* IPv4 or IPv6 */
+  size_t           maxDescs = *descSize;
+  int err;
+
+  // Initialize output parameters.  When the loop completes, *descSize is 0.
+  while ( *descSize > 0 ) {
+    desc[ --( *descSize ) ] = INVALID_DESC;
+  }
+
+  hints.ai_socktype = SOCK_STREAM; // TCP protocol
+  hints.ai_protocol = IPPROTO_TCP;
+  /*
+  ** Look up the service's well-known port number.  Notice that NULL is being
+  ** passed for the 'node' parameter, and that the AI_PASSIVE flag is set in
+  ** 'hints'.  Thus, the program is requesting passive address information.
+  ** The network address is initialized to :: (all zeros) for IPv6 records, or
+  ** 0.0.0.0 for IPv4 records.
+  */
+  if ( ( aiErr = getaddrinfo( NULL,
+                             port,
+                             &hints,
+                             &aiHead ) ) != 0 )
+  {
+    fprintf( stderr,
+             "line %d: ERROR - %s.\n",
+             __LINE__, gai_strerror( aiErr ) );
+    return -1;
+  }
+  /*
+  ** For each of the address records returned, attempt to set up a passive
+  ** socket.
+  */
+  for ( ai = aiHead;
+       ( ai != NULL ) && ( *descSize < maxDescs );
+       ai = ai->ai_next ) {
+    if ( verbose ) {
+       /*
+       ** Display the current address info.   Start with the protocol-
+       ** independent fields first.
+       */
+       fprintf(stderr,
+               "Setting up a passive socket based on the "
+               "following address info:\n"
+               "   ai_flags     = 0x%02X\n"
+               "   ai_family    = %d (PF_INET = %d, PF_INET6 = %d)\n"
+               "   ai_socktype  = %d (SOCK_STREAM = %d, SOCK_DGRAM = %d)\n"
+               "   ai_protocol  = %d (IPPROTO_TCP = %d, IPPROTO_UDP = %d)\n"
+               "   ai_addrlen   = %d (sockaddr_in = %lu, "
+               "sockaddr_in6 = %lu)\n",
+               ai->ai_flags,
+               ai->ai_family,
+               PF_INET,
+               PF_INET6,
+               ai->ai_socktype,
+               SOCK_STREAM,
+               SOCK_DGRAM,
+               ai->ai_protocol,
+               IPPROTO_TCP,
+               IPPROTO_UDP,
+               ai->ai_addrlen,
+               sizeof(struct sockaddr_in),
+               sizeof(struct sockaddr_in6));
+       /*
+       ** Now display the protocol-specific formatted socket address.  Note
+       ** that the program is requesting that getnameinfo(3) convert the
+       ** host & service into numeric strings.
+       */
+       getnameinfo(ai->ai_addr,
+                   ai->ai_addrlen,
+                   hostBfr,
+                   sizeof(hostBfr),
+                   servBfr,
+                   sizeof(servBfr),
+                   NI_NUMERICHOST | NI_NUMERICSERV);
+       switch (ai->ai_family)
+       {
+          case PF_INET:   /* IPv4 address record. */
+          {
+             struct sockaddr_in *p = (struct sockaddr_in*) ai->ai_addr;
+             fprintf(stderr,
+                     "   ai_addr      = sin_family:   %d (AF_INET = %d, "
+                     "AF_INET6 = %d)\n"
+                     "                  sin_addr:     %s\n"
+                     "                  sin_port:     %s\n",
+                     p->sin_family,
+                     AF_INET,
+                     AF_INET6,
+                     hostBfr,
+                     servBfr);
+             break;
+          }  /* End CASE of IPv4. */
+          case PF_INET6:   /* IPv6 address record. */
+          {
+             struct sockaddr_in6 *p = (struct sockaddr_in6*) ai->ai_addr;
+             fprintf(stderr,
+                     "   ai_addr      = sin6_family:   %d (AF_INET = %d, "
+                     "AF_INET6 = %d)\n"
+                     "                  sin6_addr:     %s\n"
+                     "                  sin6_port:     %s\n"
+                     "                  sin6_flowinfo: %d\n"
+                     "                  sin6_scope_id: %d\n",
+                     p->sin6_family,
+                     AF_INET,
+                     AF_INET6,
+                     hostBfr,
+                     servBfr,
+                     p->sin6_flowinfo,
+                     p->sin6_scope_id);
+             break;
+          }  // End CASE of IPv6
+          default:   // Not IPv4 and not IPv6 ??
+          {
+             freeaddrinfo(aiHead);
+             return -1;
+           }  // End of Default
+       }  // End SWITCH on protocol family
+    }  // End IF verbose mode
+
+    // Create a socket using the info in the addrinfo structure.
+    CHECK( desc[*descSize] = socket( ai->ai_family, ai->ai_socktype, ai->ai_protocol ) );
+    CHECK( setsockopt( desc[ *descSize ],
+                     SOL_SOCKET, SO_REUSEADDR,
+                     &(int){ 1 }, sizeof(int) ) );
+
+    /*
+    ** Here is the code that prevents "IPv4 mapped addresses"
+    ** If an IPv6 socket was just created, then set the
+    ** IPV6_V6ONLY socket option.
+    */
+    if ( ai->ai_family == PF_INET6 ) {
 #if defined( IPV6_V6ONLY )
-         /*
-         ** Disable IPv4 mapped addresses.
-         */
-         int v6Only = 1;
-         CHECK( setsockopt( desc[ *descSize ],
-                          IPPROTO_IPV6,
-                          IPV6_V6ONLY,
-                          &v6Only,
-                          sizeof( v6Only ) ) );
+      // Disable IPv4 mapped addresses.
+      int v6Only = 1;
+      CHECK(setsockopt(desc[ *descSize],
+            IPPROTO_IPV6,
+            IPV6_V6ONLY,
+            &v6Only,
+            sizeof(v6Only)));
 #else
-         /*
-         ** IPV6_V6ONLY is not defined, so the socket option can't be set and
-         ** thus IPv4 mapped addresses can't be disabled.  Print a warning
-         ** message and close the socket.  Design note: If the
-         ** #if...#else...#endif construct were removed, then this program
-         ** would not compile (because IPV6_V6ONLY isn't defined).  That's an
-         ** acceptable approach; IPv4 mapped addresses are certainly disabled
-         ** if the program can't build!  However, since this program is also
-         ** designed to work for IPv4 sockets as well as IPv6, I decided to
-         ** allow the program to compile when IPV6_V6ONLY is not defined, and
-         ** turn it into a run-time warning rather than a compile-time error.
-         ** IPv4 mapped addresses are still disabled because _all_ IPv6 traffic
-         ** is disabled (all IPv6 sockets are closed here), but at least this
-         ** way the server can still service IPv4 network traffic.
-         */
-         fprintf( stderr,
-                  "Line %d: WARNING - Cannot set IPV6_V6ONLY socket "
-                  "option.  Closing IPv6 %s socket.\n",
-                  __LINE__,
-                  ai->ai_protocol == IPPROTO_TCP  ?  "TCP"  :  "UDP" );
-         CHECK( close( desc[ *descSize ] ) );
-         continue;   /* Go to top of FOR loop w/o updating *descSize! */
-#endif /* IPV6_V6ONLY */
-      }  /* End IF this is an IPv6 socket. */
       /*
-      ** Bind the socket.  Again, the info from the addrinfo structure is used.
+      ** IPV6_V6ONLY is not defined, so the socket option can't be set and
+      ** thus IPv4 mapped addresses can't be disabled.  Print a warning
+      ** message and close the socket.  Design note: If the
+      ** #if...#else...#endif construct were removed, then this program
+      ** would not compile (because IPV6_V6ONLY isn't defined).  That's an
+      ** acceptable approach; IPv4 mapped addresses are certainly disabled
+      ** if the program can't build!  However, since this program is also
+      ** designed to work for IPv4 sockets as well as IPv6, I decided to
+      ** allow the program to compile when IPV6_V6ONLY is not defined, and
+      ** turn it into a run-time warning rather than a compile-time error.
+      ** IPv4 mapped addresses are still disabled because _all_ IPv6 traffic
+      ** is disabled (all IPv6 sockets are closed here), but at least this
+      ** way the server can still service IPv4 network traffic.
       */
+      fprintf(stderr,
+             "Line %d: WARNING - Cannot set IPV6_V6ONLY socket "
+             "option.  Closing IPv6 %s socket.\n",
+             __LINE__,
+             ai->ai_protocol == IPPROTO_TCP  ?  "TCP"  :  "UDP" );
+      CHECK( close( desc[ *descSize ] ) );
+      continue;   // Go to top of FOR loop w/o updating *descSize!
+#endif // IPV6_V6ONLY
+      }  // End IF this is an IPv6 socket
+      // Bind the socket.  The info from the addrinfo structure is used.
       CHECK( bind( desc[ *descSize ],
                  ai->ai_addr,
                  ai->ai_addrlen ) );
@@ -710,32 +657,25 @@ int openSocket( const char *port,
       ** If this is a TCP socket, put the socket into passive listening mode
       ** (listen is only valid on connection-oriented sockets).
       */
-      if ( ai->ai_socktype == SOCK_STREAM )
-      {
+      if ( ai->ai_socktype == SOCK_STREAM ) {
          CHECK( listen( desc[ *descSize ],
                       MAXCONNQLEN ) );
       }
-      /*
-      ** Socket set up okay.  Bump index to next descriptor array element.
-      */
+      // Socket set up okay.  Bump index to next descriptor array element.
       *descSize += 1;
-   }  /* End FOR each address info structure returned. */
-   /*
-   ** Dummy check for unused address records.
-   */
-   if ( verbose && ( ai != NULL ) )
-   {
+  }  // End FOR each address info structure returned
+   // Dummy check for unused address records.
+   if ( verbose && ( ai != NULL ) ) {
       fprintf( stderr,
                "Line %d: WARNING - Some address records were "
                "not processed due to insufficient array space.\n",
                __LINE__ );
-   }  /* End IF verbose and some address records remain unprocessed. */
-   /*
-   ** Clean up.
-   */
-   freeaddrinfo( aiHead );
-   return 0;
-}  /* End openSckt() */
+  }  /* End IF verbose and some address records remain unprocessed. */
+
+  // Clean up.
+  freeaddrinfo(aiHead);
+  return 0;
+}  // End openSckt()
 
 /******************************************************************************
 * Function: web_1x1png
@@ -744,36 +684,35 @@ int openSocket( const char *port,
 *    Listen on a set of sockets and send an HTTP response with a 1x1 PNG
 *
 * Parameters:
-*    tcpSocket     - Array of TCP socket descriptors on which to listen.
-*    tcpSocketSize - Size of the tcpSocket array (# of elements).
-*    udpSocket     - Array of UDP socket descriptors on which to listen.
-*    udpSocketSize - Size of the udpSocket array (# of elements).
+*    http_Socket     - Array of TCP socket descriptors on which to listen.
+*    http_SocketSize - Size of the tcpSocket array (# of elements).
+*    https_Socket     - Array of UDP socket descriptors on which to listen.
+*    https_SocketSize - Size of the udpSocket array (# of elements).
 *
 * Return Value: None.
 ******************************************************************************/
-void web_1x1png(int tcpSocket[], size_t tcpSocketSize,
-            int udpSocket[], size_t udpSocketSize) {
+void web_1x1png(int http_Socket[], size_t http_SocketSize,
+                int https_Socket[], size_t https_SocketSize) {
 
-  char                     buffer[ 256 ];
   ssize_t                  count;
   struct pollfd           *desc;
-  size_t                   descSize = tcpSocketSize + udpSocketSize;
+  size_t                   descSize = http_SocketSize + https_SocketSize;
   int                      idx;
   int                      newSckt;
-  struct sockaddr         *sadr;
-  socklen_t                sadrLen;
-  struct sockaddr         *clientAddr;
-  socklen_t                clientAddrLen;
-
-  struct sockaddr         *srvAddr;
-  socklen_t                srvAddrLen;
-  uint                     ifIndex;
-
-  struct sockaddr_storage  sockStor;
-  struct sockaddr_storage  srv_sockStor;
   int                      status;
   size_t                   StrLen;
-  char                    *ClientStr;
+  struct sockaddr         *sadr;
+  socklen_t                sadrLen;
+  struct sockaddr_storage  sockStor;
+  struct sockaddr_storage  srv_sockStor;
+
+  char       buffer[1500];
+  int        outBytes;
+  char       date[256];
+  char       time_str[32];
+  time_t     now;
+  struct tm *tm_now;
+  char secure = ' ';
 
   // Allocate memory for the poll(2) array.
   desc = malloc(descSize * sizeof(struct pollfd));
@@ -784,13 +723,20 @@ void web_1x1png(int tcpSocket[], size_t tcpSocketSize,
              strerror( ENOMEM ) );
     exit(1);
   }
-  // Initialize the poll(2) array
+  // Initialize the poll(2) array, merges the two socket arrays
   for (idx = 0; idx < descSize; idx++ ) {
-    desc[idx].fd      = idx < tcpSocketSize  ?  tcpSocket[idx]
-                                           :  udpSocket[idx - tcpSocketSize];
+    desc[idx].fd      = idx < http_SocketSize  ?  http_Socket[idx] // First array
+                                           :  https_Socket[idx - http_SocketSize]; //second array
     desc[idx].events  = POLLIN;
     desc[idx].revents = 0;
   }
+
+  // Initialise SSL
+  SSL_CTX *ctx;
+  init_openssl();
+  ctx = create_context();
+  configure_context(ctx);
+  
 
   if (verbose) {
     fprintf(stderr, "Entering server loop\n");
@@ -803,10 +749,10 @@ void web_1x1png(int tcpSocket[], size_t tcpSocketSize,
     // used to restart the system call in the event the process is
     // interrupted by a signal.
     do {
-      status = poll( desc, descSize, -1);  // Wait indefinitely for input
-    } while ( (status < 0) && (errno == EINTR) );
+      status = poll(desc, descSize, -1);  // Wait indefinitely for input
+    } while ((status < 0) && (errno == EINTR));
     
-    CHECK( status );
+    CHECK(status);
     // Got something
     for (idx = 0; idx < descSize; idx++) {
       switch (desc[idx].revents) {
@@ -820,91 +766,170 @@ void web_1x1png(int tcpSocket[], size_t tcpSocketSize,
            exit(1);
       }  // End SWITCH on returned poll events
 
-       // Determine if this is a TCP request
-      if ( idx < tcpSocketSize ) {
-        // TCP connection requested.  Accept it.  Notice the use of
+
+      // Obtain current time
+      time(&now);
+      tm_now = gmtime(&now);
+      strftime(date, 256, "%a,%e %b %Y %I:%M:%S GMT", tm_now);
+      strftime(time_str, 32, "%s.000", tm_now);
+
+       // Determine if this is an HTTP or HTTPS request
+      if (idx < http_SocketSize) { // Low index -> HTTP per merge above
+        // HTTP connection requested.  Accept it.  Notice the use of
         // the sockaddr_storage data type.
-        sadrLen = sizeof( sockStor );
+        sadrLen = sizeof(sockStor);
         sadr    = (struct sockaddr*) &sockStor;
-        CHECK( newSckt = accept( desc[ idx ].fd,
-                               sadr,
-                               &sadrLen ) );
-        CHECK( shutdown( newSckt,       // Server never recv's anything
-                       SHUT_RD ) );
+        CHECK(newSckt = accept(desc[idx].fd, sadr, &sadrLen));
+        CHECK(shutdown(newSckt, SHUT_RD));// Server never recv's anything
+        
+        secure = ' ';
+        // Client address-specific fields
+        getnameinfo(sadr,
+                   sadrLen,
+                   hostBfr, // Global var
+                   sizeof(hostBfr),
+                   servBfr, // Global var
+                   sizeof(servBfr),
+                   NI_NUMERICHOST | NI_NUMERICSERV);
 
-        srvAddrLen = sizeof( sockStor );
-        srvAddr    = (struct sockaddr*) &srv_sockStor;
-
-        if (getsockname(newSckt, srvAddr, &srvAddrLen)) {
-          return; // KABOOM!
-        };
-
-        // Store the client's IP address
-        ClientStr = hostBfr;
-        StrLen = strlen(ClientStr);
-
-        // Write the client's IP address to stderr
         if (verbose) {
-           fprintf(stderr, "Client's address is %s.\n", ClientStr );
+          verbose_info(newSckt, sadr, sadrLen);
         }
 
-        fprintf(stderr, "Print HTTP headers\n");
-        print_http_headers(newSckt);
-        fprintf(stderr, "Send PNG\n");
-        send_png(newSckt);
+        // Read some headers, mainly to avoid responding too quickly to the client
+        // Don't really care what is in there as we are not parsing them
+        count = read(newSckt, buffer, 1500);
+        CHECK(count);
+
+        gen_http_headers(buffer, &outBytes, date);
+        while (outBytes > 0) {
+           do {
+              count = write(newSckt, buffer, outBytes);
+           } while ( ( count < 0 ) && ( errno == EINTR ) );
+           CHECK(count);
+           outBytes -= count;
+        }  // End WHILE there is data to send
+        
+        if (verbose) {
+          fprintf(stderr, "Send PNG\n");
+        }
+        get_png(buffer, &outBytes);
+        while (outBytes > 0) {
+           do {
+              count = write(newSckt, buffer, outBytes);
+           } while ( ( count < 0 ) && ( errno == EINTR ) );
+           CHECK(count);
+           outBytes -= count;
+        }  // End WHILE there is data to send
 
         CHECK(close(newSckt));
-      }  // End TCP
+        // End HTTP
+      }  else {
+        SSL *ssl;
+        
+        sadrLen = sizeof(sockStor);
+        sadr    = (struct sockaddr*) &sockStor;
+        
+        if (verbose) {
+          fprintf(stderr, "SSL Connection\n");
+        }
+        CHECK(newSckt = accept(desc[idx].fd, sadr, &sadrLen));
+        // Client address-specific fields
+        getnameinfo(sadr,
+                   sadrLen,
+                   hostBfr, // Global var
+                   sizeof(hostBfr),
+                   servBfr, // Global var
+                   sizeof(servBfr),
+                   NI_NUMERICHOST | NI_NUMERICSERV);
+        ssl = SSL_new(ctx);
+        SSL_set_fd(ssl, newSckt);
+
+        secure = 's';
+        if (verbose) {
+          verbose_info(newSckt, sadr, sadrLen);
+        }
+
+        if(verbose) {
+          fprintf(stderr,"SSL Accept\n");
+        }
+        if (SSL_accept(ssl) <= 0) {
+           ERR_print_errors_fp(stderr);
+           exit(1);
+        }
+
+        // Read some headers, mainly to avoid responding too quickly to the client
+        // Don't really care what is in there as we are not parsing them
+        count = SSL_read(ssl, buffer, 1500);
+        if (count <= 0) {
+           ERR_print_errors_fp(stderr);
+           exit(1);
+        }
+        
+        // write HTTP headers
+        gen_http_headers(buffer, &outBytes, date);
+        if(verbose) {
+          fprintf(stderr,"Send Headers\n");
+        }
+
+        count = SSL_write(ssl, buffer, outBytes);
+        if (count <= 0) {
+           ERR_print_errors_fp(stderr);
+           exit(1);
+        }
+        count = outBytes;
+        get_png(buffer+count, &outBytes);
+        count += outBytes;
+        if(verbose) {
+          fprintf(stderr,"Send PNG\n");
+        }
+        count = SSL_write(ssl, buffer, count);
+        if (verbose) {
+          fprintf(stderr,"PNG write count: %ld\n", count);
+        }
+        if (count <= 0) {
+           ERR_print_errors_fp(stderr);
+           exit(1);
+        }
+
+        SSL_shutdown(ssl);
+        SSL_free(ssl);
+        CHECK(close(newSckt));
+      } // End HTTPS
+      log_write(date, secure, time_str);
       desc[idx].revents = 0;   /* Clear the returned poll events. */
     }  // End FOR each socket descriptor.
   }  // End WHILE forever.
 }
 
-void print_http_headers(int newSckt) {
-
+void gen_http_headers(char *buffer, int* len, char *date) {
   char    *headers[10];
-  char    date[256];
-  ssize_t outBytes;
-  int count;
-  char buffer[1500];
-
-  // Obtain current time
-  time_t now;
-  time(&now);
-  struct tm *tm_now = gmtime(&now);
-  strftime(date, 256, "Date: %a,%e %b %Y %I:%M:%S GMT\r\n", tm_now);
-
+  int slen = 0;
+  
   headers[0] = "HTTP/1.1 200 OK\r\n";
   headers[1] = "Server: apnic/1.0.0\r\n";
-  headers[2] = date;
-  headers[3] = "Content-Type: image/png\r\n";
-  headers[4] = "Content-Length: 68\r\n"; // Length of the PNG image
-  headers[5] = "Last-Modified: Mon, 28 Sep 1970 06:00:00 GMT\r\n";
-  headers[6] = "Connection: keep-alive\r\n";
-  headers[7] = "Access-Control-Allow-Origin: *\r\n";
-  headers[8] = "\r\n";
+  headers[2] = "Date: : ";
+  headers[3] = date;
+  headers[4] = "\r\nContent-Type: image/png\r\n";
+  headers[5] = "Content-Length: 68\r\n"; // Length of the PNG image
+  headers[6] = "Last-Modified: Mon, 28 Sep 1970 06:00:00 GMT\r\n";
+  headers[7] = "Connection: keep-alive\r\n";
+  headers[8] = "Access-Control-Allow-Origin: *\r\n";
+  headers[9] = "\r\n";
 
   int i;
-  // Send headers to client
-  for (i=0; i<9; i++) {
-    strcat(buffer, headers[i]);
+  // Cat headers together
+  for (i=0; i<10; i++) {
+    strcpy(buffer+slen, headers[i]);
+    slen += strlen(headers[i]);
   }
+  *len = slen;
   if (verbose) {
     fprintf(stderr, "All Headers: %s", buffer);
   }
-  outBytes = strlen(buffer);
-  while (outBytes > 0) {
-     do {
-        count = write(newSckt, buffer, outBytes);
-     } while ( ( count < 0 ) && ( errno == EINTR ) );
-     CHECK(count);
-     outBytes -= count;
-  }  // End WHILE there is data to send
 }
-
-void send_png(int newSckt) {
-  ssize_t outBytes;
-  int count;
+/****************************************************************************************************/
+void get_png(char *buffer, int *len) {
   const unsigned char png[] = 
   {0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52, \
    0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1f, 0x15, 0xc4, \
@@ -912,13 +937,209 @@ void send_png(int newSckt) {
    0x05, 0x00, 0x01, 0x0d, 0x0a, 0x2d, 0xb4, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, \
    0x42, 0x60, 0x82, 0x00};
 
-  outBytes = sizeof(png);
-  while (outBytes > 0)
-  {
-    do {
-      count = write( newSckt, png, outBytes);
-    } while ( ( count < 0 ) && ( errno == EINTR ) );
-    CHECK(count);
-    outBytes -= count;
-  }  // End WHILE there is data to send
+  memcpy(buffer, png, sizeof(png));
+  *len = sizeof(png);
 }
+/****************************************************************************************************/
+void log_write(char *date, char secure, char *timestamp) {
+  fprintf(stdout, \
+    "%s %s [%s] \"GET something HTTP/1.1\" 200 68 \"-\" \"Some web browser\" \"Some TLS version\" 0.0000 http%c %s some-URL\n",\
+    server_hostname, hostBfr, date, secure, timestamp);
+}
+/****************************************************************************************************/
+void verbose_info(int socket, struct sockaddr *sadr, socklen_t sadrLen) {
+  struct sockaddr         *clientAddr;
+  socklen_t                clientAddrLen;
+
+  struct sockaddr         *srvAddr;
+  socklen_t                srvAddrLen;
+  uint                     ifIndex;
+
+  struct sockaddr_storage  sockStor;
+  struct sockaddr_storage  srv_sockStor;
+  
+  size_t                   StrLen;
+  char                    *ClientStr;
+  
+
+  srvAddrLen = sizeof(sockStor);
+  srvAddr    = (struct sockaddr*) &srv_sockStor;
+
+  if (getsockname(socket, srvAddr, &srvAddrLen)) {
+    return; // KABOOM!
+  };
+  // Display the socket address of the remote client.  Begin with
+  // the address-independent fields
+  fprintf(stderr,
+           "Sockaddr info for new TCP client:\n"
+           "   sa_family = %d (AF_INET = %d, AF_INET6 = %d)\n"
+           "   addr len  = %d (sockaddr_in = %ld, "
+           "sockaddr_in6 = %ld)\n",
+           sadr->sa_family,
+           AF_INET,
+           AF_INET6,
+           sadrLen,
+           sizeof(struct sockaddr_in),
+           sizeof(struct sockaddr_in6));
+
+  // Already done in the calling function with global var
+  // // Client address-specific fields
+  // getnameinfo(sadr,
+  //            sadrLen,
+  //            hostBfr,
+  //            sizeof(hostBfr),
+  //            servBfr,
+  //            sizeof(servBfr),
+  //            NI_NUMERICHOST | NI_NUMERICSERV);
+
+  // Server address-specific fields.
+  getnameinfo(srvAddr,
+              srvAddrLen,
+              srvBfr,
+              sizeof(srvBfr),
+              srvportBfr,
+              sizeof(srvportBfr),
+              NI_NUMERICHOST | NI_NUMERICSERV);
+
+  switch ( sadr->sa_family ) {
+    case AF_INET:  // IPv4 address
+    {
+      struct sockaddr_in *p = (struct sockaddr_in*) sadr;
+      fprintf(stderr,
+              "Client info: \n"
+              "   sin_addr  = sin_family: %d\n"
+              "               sin_addr:   %s\n"
+              "               sin_port:   %s\n",
+              p->sin_family,
+              hostBfr,
+              servBfr );
+
+      // Print the server address that got the packet
+      p = (struct sockaddr_in*) srvAddr;
+      fprintf(stderr,
+              "Server address: \n"
+              "   sin_addr  = sin_family: %d\n"
+              "               sin_addr:   %s\n"
+              "               sin_port:   %s\n",
+              p->sin_family,
+              srvBfr,
+              srvportBfr );
+       break;
+    }  // End CASE of IPv4
+    case AF_INET6:  // IPv6 address
+    {
+      struct sockaddr_in6 *p = (struct sockaddr_in6*) sadr;
+      fprintf(stderr,
+              "Client info: \n"
+              "   sin6_addr = sin6_family:   %d\n"
+              "               sin6_addr:     %s\n"
+              "               sin6_port:     %s\n"
+              "               sin6_flowinfo: %d\n"
+              "               sin6_scope_id: %d\n",
+              p->sin6_family,
+              hostBfr,
+              servBfr,
+              p->sin6_flowinfo,
+              p->sin6_scope_id);
+
+      // Print the server address that got the packet
+      p = (struct sockaddr_in6*) srvAddr;
+      fprintf(stderr,
+              "Server address: \n"
+              "   sin_addr  = sin6_family: %d\n"
+              "               sin6_addr:   %s\n"
+              "               sin6_port:   %s\n",
+              p->sin6_family,
+              srvBfr,
+              srvportBfr);
+      break;
+    }  // End CASE of IPv6
+    default:   // Not IPv4 and not IPv6 ??
+    {
+      // TODO add something if you want to deal with this
+       break;
+    }  // End of Default
+  }  /* End SWITCH on address family. */
+
+  // Store the client's IP address
+  // ClientStr = hostBfr;
+  // StrLen = strlen(ClientStr);
+
+  // Write the client's IP address to stderr
+  // fprintf(stderr, "Client's address is %s.\n", hostBfr);
+
+}
+
+/******************************************************************************
+* Function: main
+*
+* Description:
+*    Simple server that binds on TCP and UDP, IPv4 and IPv6
+*    On IPv6 listens on all addresses of a whole prefix
+*    Sends back text with the addresses of both endpoints
+*
+* Parameters:
+*    argc and argv
+*
+* Return Values:
+*    Should run forever, exit if it can't create sockets
+******************************************************************************/
+int main(int argc, char *argv[])
+{
+  int         opt;
+  const char *http_port   = DEFAULT_HTTP_PORT;
+  const char *https_port   = DEFAULT_HTTPS_PORT;
+  int         http_Socket[ MAX_HTTP_SOCKETS ];     /* Array of HTTP socket descriptors. */
+  size_t      http_SocketSize = MAX_HTTP_SOCKETS;  /* Size of http_Socket (# of elements).   */
+  int         https_Socket[ MAX_HTTPS_SOCKETS ];     /* Array of HTTPS socket descriptors. */
+  size_t      https_SocketSize = MAX_HTTPS_SOCKETS;  /* Size of https_Socket (# of elements).   */
+
+  // Set the program name (w/o directory prefix).
+  execName = strrchr( argv[ 0 ], '/' );
+  execName = execName == NULL  ?  argv[ 0 ]  :  execName + 1;
+
+  // Process command options.
+  opterr = 0;   // Turns off "invalid option" error messages
+  while ( ( opt = getopt( argc, argv, CLI_OPTS ) ) >= 0 ) {
+    switch ( opt ) {
+      case 'v':   // Verbose mode
+        verbose = true;
+        break;
+      case 'p': // HTTP port
+        http_port = optarg;
+        break;
+      case 's': // HTTPS port
+        https_port = optarg;
+        break;
+      default:
+        usage(execName);
+    }  // End SWITCH on command option
+  }  // End WHILE processing options
+  // // Process command line arguments.
+  // switch ( argc - optind ) {
+  //   case 0:  break;
+  //   case 1:  port = argv[ optind ]; break;
+  //   default:  usage(execName);
+  // }
+  // Open TCP sockerts for both HTTP and HTTPS port, for each of IPv4 & IPv6
+  if ((openSocket(http_port, http_Socket, &http_SocketSize) < 0) ||
+      (openSocket(https_port, https_Socket, &https_SocketSize) < 0))
+  {
+    exit(1);
+  }
+  
+  if (gethostname(server_hostname, NI_MAXHOST)) {
+    strcpy(server_hostname, "no.server.name"); // Could not get hostname
+  }
+
+  // Run the "web" server.
+  if ((http_SocketSize > 0) || (https_SocketSize > 0)) {
+    web_1x1png(http_Socket, http_SocketSize, https_Socket, https_SocketSize);
+  }
+
+  // web_1x1png() never returns, but socket creation might fail
+  if (verbose) {
+    fprintf( stderr, "Couldn't open sockets, bailing.\n");
+  }
+  return 0;
+}  // End main()
