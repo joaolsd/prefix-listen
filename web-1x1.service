@@ -1,0 +1,15 @@
+[Unit]
+Description=web-1x1
+After=syslog.target network.target
+
+[Service]
+Type=forking
+PIDFile=/var/run/web-1x1.pid
+#ExecStartPre=
+ExecStart=/sbin/start-stop-daemon --start  --background \
+     --make-pidfile --pidfile ${PIDFile} --exec /usr/local/bin/run-web-1x1.sh
+#ExecReload=
+ExecStop=/sbin/start-stop-daemon --stop --pid ${PIDFile}
+
+[Install]
+WantedBy=multi-user.target
