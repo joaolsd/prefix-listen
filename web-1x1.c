@@ -63,12 +63,8 @@
 #define MAXCONNQLEN  256        // Max # of connection requests to queue
 #define MAX_HTTP_SOCKETS  2   // One HTTP socket for IPv4 and one for IPv6
 #define MAX_HTTPS_SOCKETS  2  // One HTTPS socket for IPv4 and one for IPv6
-#define CLI_OPTS    "vp:s:"   // Command line options
+#define CLI_OPTS    "vc:k:p:s:"   // Command line options
 #define INVALID_DESC -1       // Invalid file descriptor
-
-// crypto material files
-char cert_file[] = "cert.pem";
-char key_file []= "key.pem";
 
 // Handy boolean type
 typedef enum { false = 0, true } boolean;
@@ -81,6 +77,10 @@ char srvportBfr[NI_MAXSERV];// For use w/getnameinfo(3)
 char server_hostname[NI_MAXHOST]; // to store server name
 const char *execName;        // Executable name
 boolean     verbose = false; // Verbose mode?
+
+// crypto material files
+char cert_file[] = "cert.pem";
+char key_file []= "key.pem";
 
 // Function prototypes
 int set_sock_opts(int socket);
@@ -1071,18 +1071,9 @@ void verbose_info(int socket, struct sockaddr *sadr, socklen_t sadrLen) {
 }
 
 /******************************************************************************
-* Function: main
-*
-* Description:
-*    Simple server that binds on TCP and UDP, IPv4 and IPv6
+*    Simple server that binds on TCP, IPv4 and IPv6, http and https
 *    On IPv6 listens on all addresses of a whole prefix
-*    Sends back text with the addresses of both endpoints
-*
-* Parameters:
-*    argc and argv
-*
-* Return Values:
-*    Should run forever, exit if it can't create sockets
+*    Sends back a 1x1 PNG "file"
 ******************************************************************************/
 int main(int argc, char *argv[])
 {
@@ -1099,11 +1090,17 @@ int main(int argc, char *argv[])
   execName = execName == NULL  ?  argv[ 0 ]  :  execName + 1;
 
   // Process command options.
-  opterr = 0;   // Turns off "invalid option" error messages
-  while ( ( opt = getopt( argc, argv, CLI_OPTS ) ) >= 0 ) {
-    switch ( opt ) {
+  opterr = 0; // Turns off "invalid option" error messages
+  while ((opt = getopt(argc, argv, CLI_OPTS)) >= 0) {
+    switch (opt) {
       case 'v':   // Verbose mode
         verbose = true;
+        break;
+      case 'c': // TLS Certificate file
+        cert_file = optarg;
+        break;
+      case 'k': // TLS Key file
+        key_file = optarg;
         break;
       case 'p': // HTTP port
         http_port = optarg;
@@ -1123,11 +1120,11 @@ int main(int argc, char *argv[])
   // }
   // Open TCP sockerts for both HTTP and HTTPS port, for each of IPv4 & IPv6
   if ((openSocket(http_port, http_Socket, &http_SocketSize) < 0) ||
-      (openSocket(https_port, https_Socket, &https_SocketSize) < 0))
-  {
+      (openSocket(https_port, https_Socket, &https_SocketSize) < 0)) {
     exit(1);
   }
-  
+
+  // get server hostname for logs
   if (gethostname(server_hostname, NI_MAXHOST)) {
     strcpy(server_hostname, "no.server.name"); // Could not get hostname
   }
