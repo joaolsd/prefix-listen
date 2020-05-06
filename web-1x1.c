@@ -115,7 +115,7 @@ void log_write(char *date, char secure, char *timestamp);
 
 // Usage message
 void usage(const char * execName) {
-   fprintf( stderr, "Usage: %s [-v] [-p <http_port>] [-s <https_port]\n", execName );
+   fprintf( stderr, "Usage: %s [-v] [-c cert_file] [-k key_file] [-p <http_port>] [-s <https_port]\n", execName );
    exit(1);
 }
 
