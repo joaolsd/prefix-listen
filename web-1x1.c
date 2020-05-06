@@ -79,8 +79,8 @@ const char *execName;        // Executable name
 boolean     verbose = false; // Verbose mode?
 
 // crypto material files
-char cert_file[] = "cert.pem";
-char key_file []= "key.pem";
+char *cert_file = "cert.pem";
+char *key_file  = "key.pem";
 
 // Function prototypes
 int set_sock_opts(int socket);
