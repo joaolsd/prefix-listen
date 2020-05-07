@@ -1,5 +1,5 @@
 .DEFAULT_GOAL := all
-.PHONY: check-env install
+.PHONY: check-env install clean
 
 WEB-1x1_RUN_TEMPLATE=run-web-1x1.sh.tmpl
 
@@ -9,7 +9,7 @@ ifndef HOST
 endif
 
 clean:
-	rm *.o tcp-server test-server udp_server
+	$(RM) *.o tcp-server test-server udp_server
 
 web-1x1.o: web-1x1.c
 	gcc -c web-1x1.c -I /usr

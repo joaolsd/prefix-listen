@@ -601,7 +601,7 @@ int openSocket(const char *port, int desc[], size_t *descSize) {
     }  // End IF verbose mode
 
     // Create a socket using the info in the addrinfo structure.
-    CHECK(desc[*descSize] = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
+    CHECK(desc[*descSize] = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol));
     CHECK(setsockopt(desc[ *descSize ],
                      SOL_SOCKET, SO_REUSEADDR,
                      &(int){ 1 }, sizeof(int)));
