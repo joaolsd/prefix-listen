@@ -58,13 +58,13 @@
 #define BUFSIZE 1024
 
 // Constants
-#define DEFAULT_HTTP_PORT "8080"   // Default service name or port number
-#define DEFAULT_HTTPS_PORT "8443"  // Default service name or port number
-#define MAXCONNQLEN  256        // Max # of connection requests to queue
-#define MAX_HTTP_SOCKETS  2   // One HTTP socket for IPv4 and one for IPv6
-#define MAX_HTTPS_SOCKETS  2  // One HTTPS socket for IPv4 and one for IPv6
-#define CLI_OPTS    "vc:k:p:s:"   // Command line options
-#define INVALID_DESC -1       // Invalid file descriptor
+#define DEFAULT_HTTP_PORT "8080"    // Default service name or port number
+#define DEFAULT_HTTPS_PORT "8443"   // Default service name or port number
+#define MAXCONNQLEN  1024           // Max # of connection requests to queue
+#define MAX_HTTP_SOCKETS  2         // One HTTP socket for IPv4 and one for IPv6
+#define MAX_HTTPS_SOCKETS  2        // One HTTPS socket for IPv4 and one for IPv6
+#define CLI_OPTS    "a:b:c:k:p:s:v" // Command line options
+#define INVALID_DESC -1             // Invalid file descriptor
 
 // Handy boolean type
 typedef enum { false = 0, true } boolean;
@@ -115,7 +115,7 @@ void log_write(char *date, char secure, char *timestamp);
 
 // Usage message
 void usage(const char * execName) {
-   fprintf( stderr, "Usage: %s [-v] [-c cert_file] [-k key_file] [-p <http_port>] [-s <https_port]\n", execName );
+   fprintf( stderr, "Usage: %s [-v] [-a IPv4 address] [-b IPv6 address|all] [-c cert_file] [-k key_file] [-p <http_port>] [-s <https_port]\n", execName );
    exit(1);
 }
 
@@ -162,11 +162,10 @@ int set_sock_opts(int socket) {
 	struct sockaddr_storage addr;
 	socklen_t addr_len = sizeof(addr);
 
-  /* If we fail it will be because the system doesn't support the 
-   * options we want, so set errno
-   */
+  // If we fail it will be because the system doesn't support the 
+  // options we want, so set errno
 	errno = ENOSYS;
-  /* Need to find address family to set corresponding options */
+  // Need to find address family to set corresponding options
 	if (getsockname(socket, (struct sockaddr *) &addr, &addr_len) < 0) {
 		return -1;
 	}
@@ -222,8 +221,8 @@ int recvfrom_to(int socket, void *buffer, size_t bufferLen, int flags,
 	struct sockaddr_storage srcAddr;
 	socklen_t srcLen = sizeof(srcAddr);
 
-  // In order to be able to get the server side address at which we got the message
-  // we need proper support in recvmsg
+  // In order to be able to get the server side address at which we got the 
+  // message we need proper support in recvmsg
 #if !defined(IP_PKTINFO) && !defined(IP_RECVDSTADDR) && !defined (IPV6_PKTINFO)
 	srv = NULL:
 #endif
@@ -479,20 +478,19 @@ int sendto_from(int socket, void *buffer, size_t bufferLen, int flags,
 * Return Value:
 *    0 on success, -1 on error.
 ******************************************************************************/
-int openSocket( const char *port,
-                     int         desc[ ],
-                     size_t     *descSize ) {
+int openSocket(const char *port, int desc[], size_t *descSize) {
   struct addrinfo *ai;
   int              aiErr;
   struct addrinfo *aiHead;
-  struct addrinfo  hints    = { .ai_flags  = AI_PASSIVE,    /* Server mode. */
-                               .ai_family = PF_UNSPEC };   /* IPv4 or IPv6 */
+  struct addrinfo  hints    = {.ai_flags  = AI_PASSIVE,   // Server mode
+                               // .ai_family = PF_UNSPEC };  // IPv4 or IPv6
+                               .ai_family = PF_INET6 };  // IPv6 only
   size_t           maxDescs = *descSize;
   int err;
 
-  // Initialize output parameters.  When the loop completes, *descSize is 0.
-  while ( *descSize > 0 ) {
-    desc[ --( *descSize ) ] = INVALID_DESC;
+  // Initialize output parameters. When the loop completes, *descSize is 0.
+  while (*descSize > 0) {
+    desc[--(*descSize)] = INVALID_DESC;
   }
 
   hints.ai_socktype = SOCK_STREAM; // TCP protocol
@@ -503,15 +501,13 @@ int openSocket( const char *port,
   ** 'hints'.  Thus, the program is requesting passive address information.
   ** The network address is initialized to :: (all zeros) for IPv6 records, or
   ** 0.0.0.0 for IPv4 records.
+  // IN APNIC's current case we are disabling IPv4 as all we want is to see
+  // IPv6 clients that have their IPv4 addressed enconded in the the IPv6
   */
-  if ( ( aiErr = getaddrinfo( NULL,
-                             port,
-                             &hints,
-                             &aiHead ) ) != 0 )
-  {
-    fprintf( stderr,
-             "line %d: ERROR - %s.\n",
-             __LINE__, gai_strerror( aiErr ) );
+  if ((aiErr = getaddrinfo(NULL, port, &hints, &aiHead)) != 0) {
+    fprintf(stderr,
+            "line %d: ERROR - %s.\n",
+            __LINE__, gai_strerror(aiErr));
     return -1;
   }
   /*
@@ -521,7 +517,7 @@ int openSocket( const char *port,
   for ( ai = aiHead;
        ( ai != NULL ) && ( *descSize < maxDescs );
        ai = ai->ai_next ) {
-    if ( verbose ) {
+    if (verbose) {
        /*
        ** Display the current address info.   Start with the protocol-
        ** independent fields first.
@@ -562,7 +558,7 @@ int openSocket( const char *port,
                    NI_NUMERICHOST | NI_NUMERICSERV);
        switch (ai->ai_family)
        {
-          case PF_INET:   /* IPv4 address record. */
+          case PF_INET:  // IPv4 address record
           {
              struct sockaddr_in *p = (struct sockaddr_in*) ai->ai_addr;
              fprintf(stderr,
@@ -577,7 +573,7 @@ int openSocket( const char *port,
                      servBfr);
              break;
           }  /* End CASE of IPv4. */
-          case PF_INET6:   /* IPv6 address record. */
+          case PF_INET6:  // IPv6 address record
           {
              struct sockaddr_in6 *p = (struct sockaddr_in6*) ai->ai_addr;
              fprintf(stderr,
@@ -605,10 +601,10 @@ int openSocket( const char *port,
     }  // End IF verbose mode
 
     // Create a socket using the info in the addrinfo structure.
-    CHECK( desc[*descSize] = socket( ai->ai_family, ai->ai_socktype, ai->ai_protocol ) );
-    CHECK( setsockopt( desc[ *descSize ],
+    CHECK(desc[*descSize] = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
+    CHECK(setsockopt(desc[ *descSize ],
                      SOL_SOCKET, SO_REUSEADDR,
-                     &(int){ 1 }, sizeof(int) ) );
+                     &(int){ 1 }, sizeof(int)));
 
     /*
     ** Here is the code that prevents "IPv4 mapped addresses"
@@ -646,31 +642,30 @@ int openSocket( const char *port,
              __LINE__,
              ai->ai_protocol == IPPROTO_TCP  ?  "TCP"  :  "UDP" );
       CHECK( close( desc[ *descSize ] ) );
-      continue;   // Go to top of FOR loop w/o updating *descSize!
+      continue;  // Go to top of FOR loop w/o updating *descSize!
 #endif // IPV6_V6ONLY
       }  // End IF this is an IPv6 socket
       // Bind the socket.  The info from the addrinfo structure is used.
-      CHECK( bind( desc[ *descSize ],
+      CHECK(bind(desc[*descSize],
                  ai->ai_addr,
-                 ai->ai_addrlen ) );
+                 ai->ai_addrlen ));
       /*
       ** If this is a TCP socket, put the socket into passive listening mode
       ** (listen is only valid on connection-oriented sockets).
       */
-      if ( ai->ai_socktype == SOCK_STREAM ) {
-         CHECK( listen( desc[ *descSize ],
-                      MAXCONNQLEN ) );
+      if (ai->ai_socktype == SOCK_STREAM) {
+         CHECK(listen(desc[*descSize], MAXCONNQLEN));
       }
       // Socket set up okay.  Bump index to next descriptor array element.
       *descSize += 1;
   }  // End FOR each address info structure returned
    // Dummy check for unused address records.
-   if ( verbose && ( ai != NULL ) ) {
-      fprintf( stderr,
-               "Line %d: WARNING - Some address records were "
-               "not processed due to insufficient array space.\n",
-               __LINE__ );
-  }  /* End IF verbose and some address records remain unprocessed. */
+   if (verbose && (ai != NULL)) {
+      fprintf(stderr,
+              "Line %d: WARNING - Some address records were "
+              "not processed due to insufficient array space.\n",
+              __LINE__ );
+  }  // End IF verbose and some address records remain unprocessed
 
   // Clean up.
   freeaddrinfo(aiHead);
@@ -1093,8 +1088,11 @@ int main(int argc, char *argv[])
   opterr = 0; // Turns off "invalid option" error messages
   while ((opt = getopt(argc, argv, CLI_OPTS)) >= 0) {
     switch (opt) {
-      case 'v':   // Verbose mode
-        verbose = true;
+      case 'a': // IPv4 address to bind
+        srv_ipv4_addr = optarg;
+        break;
+      case 'b': // IPv6 addr to bond or 'all'
+        srv_ipv6_addr = optarg;
         break;
       case 'c': // TLS Certificate file
         cert_file = optarg;
@@ -1108,7 +1106,10 @@ int main(int argc, char *argv[])
       case 's': // HTTPS port
         https_port = optarg;
         break;
-      default:
+      case 'v':   // Verbose mode
+        verbose = true;
+        break;
+        default:
         usage(execName);
     }  // End SWITCH on command option
   }  // End WHILE processing options
