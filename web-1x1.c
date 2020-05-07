@@ -77,8 +77,8 @@ char srvportBfr[NI_MAXSERV];// For use w/getnameinfo(3)
 char server_hostname[NI_MAXHOST]; // to store server name
 const char *execName;        // Executable name
 boolean     verbose = false; // Verbose mode?
-char srv_ipv4_addr[16];
-char srv_ipv6_addr[40];
+char *srv_ipv4_addr;
+char *srv_ipv6_addr;
 
 // crypto material files
 char *cert_file = "cert.pem";
