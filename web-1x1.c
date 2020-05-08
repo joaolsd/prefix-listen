@@ -85,8 +85,6 @@ char *cert_file = "cert.pem";
 char *key_file  = "key.pem";
 
 // Function prototypes
-int set_sock_opts(int socket);
-
 int sendto_from(int socket, void *buffer, size_t bufferLen, int flags,
 	       struct sockaddr *clientAddr, socklen_t *clientLen,
 	       struct sockaddr *srvAddr, socklen_t *srvLen, uint *ifindex);
@@ -157,56 +155,6 @@ void configure_context(SSL_CTX *ctx)
   }
 }
 
-//Set socket options to listen on unbound IPv6 addresses
-int set_sock_opts(int socket) {
-	int proto, flag;
-  int enable = 1; // Set it
-	struct sockaddr_storage addr;
-	socklen_t addr_len = sizeof(addr);
-
-  // If we fail it will be because the system doesn't support the 
-  // options we want, so set errno
-	errno = ENOSYS;
-  // Need to find address family to set corresponding options
-	if (getsockname(socket, (struct sockaddr *) &addr, &addr_len) < 0) {
-		return -1;
-	}
-
-#ifdef IP_FREEBIND
-	(void) setsockopt(socket, IPPROTO_IP, IP_FREEBIND, &enable, sizeof(enable));
-#endif
-#ifdef IP_BINDANY
-	if (addr.ss_family == AF_INET) {
-		(void) setsockopt(socket, IPPROTO_IP, IP_BINDANY, &enable, sizeof(enable));
-	}
-#endif
-#ifdef IPV6_BINDANY
-	if (addr.ss_family == AF_INET6) {
-		(void) setsockopt(socket, IPPROTO_IPV6, IPV6_BINDANY, &enable, sizeof(enable));
-	}
-#endif
-
-// IPv4
-	if (addr.ss_family == AF_INET) {
-#ifdef HAVE_IP_PKTINFO
-		// If on Linux
-		proto = SOL_IP;
-		flag = IP_PKTINFO;
-#endif
-#ifdef IP_RECVDSTADDR
-		proto = IPPROTO_IP;
-		// Set IP_RECVDSTADDR option (*BSD)
-		flag = IP_RECVDSTADDR;
-#endif
-	} else if (addr.ss_family == AF_INET6) {
-// IPv6
-#ifdef IPV6_PKTINFO
-		proto = IPPROTO_IPV6;
-		flag = SSO_IPV6_RECVPKTINFO;
-#endif
-	}  
-  return setsockopt(socket, proto, flag, &enable, sizeof(enable));
-}
 /* 
  * Function similar to recvfrom but also gets you the server address at 
  * which the message arrived
@@ -506,12 +454,19 @@ int openSocket(const char *port, int desc[], size_t *descSize) {
   // IN APNIC's current case we are disabling IPv4 as all we want is to see
   // IPv6 clients that have their IPv4 addressed enconded in the the IPv6
   */
-  if ((aiErr = getaddrinfo(NULL, port, &hints, &aiHead)) != 0) {
+  
+  if ((aiErr = getaddrinfo(srv_ipv6_addr, port, &hints, &aiHead)) != 0) {
     fprintf(stderr,
             "line %d: ERROR - %s.\n",
             __LINE__, gai_strerror(aiErr));
     return -1;
   }
+  // if ((aiErr = getaddrinfo(NULL, port, &hints, &aiHead)) != 0) {
+  //   fprintf(stderr,
+  //           "line %d: ERROR - %s.\n",
+  //           __LINE__, gai_strerror(aiErr));
+  //   return -1;
+  // }
   /*
   ** For each of the address records returned, attempt to set up a passive
   ** socket.
@@ -519,7 +474,24 @@ int openSocket(const char *port, int desc[], size_t *descSize) {
   for ( ai = aiHead;
        ( ai != NULL ) && ( *descSize < maxDescs );
        ai = ai->ai_next ) {
+
+    int if_index = if_nametoindex("lo");
+    struct sockaddr_in6 *tmp_in = (struct sockaddr_in6*) ai->ai_addr;
+    tmp_in->sin6_scope_id = if_index;
+
     if (verbose) {
+       // Print info on all interfaces
+       struct if_nameindex *if_nidxs, *intf;
+      
+       if_nidxs = if_nameindex();
+       if (if_nidxs != NULL) {
+         fprintf(stderr,"Network interfaces\n");
+         for (intf = if_nidxs; intf->if_index != 0 || intf->if_name != NULL; intf++) {
+             fprintf(stderr, "%s: %d, ", intf->if_name, intf->if_index);
+         }
+         if_freenameindex(if_nidxs);
+       }
+       fprintf(stderr,"\n");
        /*
        ** Display the current address info.   Start with the protocol-
        ** independent fields first.
@@ -604,9 +576,16 @@ int openSocket(const char *port, int desc[], size_t *descSize) {
 
     // Create a socket using the info in the addrinfo structure.
     CHECK(desc[*descSize] = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol));
-    CHECK(setsockopt(desc[ *descSize ],
+    // CHECK(setsockopt(desc[*descSize],
+    //                  IPPROTO_IP, IP_FREEBIND, &(int){1}, sizeof(int)));
+    CHECK(setsockopt(desc[*descSize],
                      SOL_SOCKET, SO_REUSEADDR,
-                     &(int){ 1 }, sizeof(int)));
+                     &(int){1}, sizeof(int)));
+    // CHECK(setsockopt(desc[*descSize],
+    //                  SOL_SOCKET, SO_BINDTODEVICE,
+    //                  "lo", 2));
+    // CHECK(setsockopt(desc[*descSize],
+    //                 IPPROTO_IP, IP_TRANSPARENT, &(int){1}, sizeof(int)));
 
     /*
     ** Here is the code that prevents "IPv4 mapped addresses"
@@ -643,14 +622,13 @@ int openSocket(const char *port, int desc[], size_t *descSize) {
              "option.  Closing IPv6 %s socket.\n",
              __LINE__,
              ai->ai_protocol == IPPROTO_TCP  ?  "TCP"  :  "UDP" );
-      CHECK( close( desc[ *descSize ] ) );
+      CHECK(close(desc[*descSize]));
       continue;  // Go to top of FOR loop w/o updating *descSize!
 #endif // IPV6_V6ONLY
       }  // End IF this is an IPv6 socket
-      // Bind the socket.  The info from the addrinfo structure is used.
-      CHECK(bind(desc[*descSize],
-                 ai->ai_addr,
-                 ai->ai_addrlen ));
+
+      // Bind the socket. The info from the addrinfo structure is used.
+      CHECK(bind(desc[*descSize], ai->ai_addr, ai->ai_addrlen));
       /*
       ** If this is a TCP socket, put the socket into passive listening mode
       ** (listen is only valid on connection-oriented sockets).
@@ -1111,7 +1089,7 @@ int main(int argc, char *argv[])
       case 'v':   // Verbose mode
         verbose = true;
         break;
-        default:
+      default:
         usage(execName);
     }  // End SWITCH on command option
   }  // End WHILE processing options
