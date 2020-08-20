@@ -1,6 +1,7 @@
 .DEFAULT_GOAL := all
 .PHONY: check-env install clean
 
+CFLAGS=-g -O0
 WEB-1x1_RUN_TEMPLATE=run-web-1x1.sh.tmpl
 
 check-env:
@@ -29,10 +30,10 @@ config: check-env ${WEB-1x1_SERVIVE_TEMPLATE}
 	
 
 all: tcp-server.o test-server.o udp_server.o web-1x1.o
-	gcc -o tcp-server tcp-server.o
-	gcc -o test-server test-server.o
-	gcc -o udp_server udp_server.o
-	gcc -o web-1x1 web-1x1.o  -L/usr/lib/x86_64-linux-gnu/ -lssl -lcrypto
+	gcc $(CFLAGS) -o tcp-server tcp-server.o
+	gcc $(CFLAGS) -o test-server test-server.o
+	gcc $(CFLAGS) -o udp_server udp_server.o
+	gcc $(CFLAGS) -o web-1x1 web-1x1.o  -L/usr/lib/x86_64-linux-gnu/ -lssl -lcrypto
 
 install: all config
 	/usr/bin/install -m 755 web-1x1 /usr/local/bin

@@ -56,7 +56,7 @@
 #endif
 
 #define BUFSIZE 1024
-
+#define ERR_BUF_SIZE 1024
 // Constants
 #define DEFAULT_HTTP_PORT "8080"    // Default service name or port number
 #define DEFAULT_HTTPS_PORT "8443"   // Default service name or port number
@@ -119,14 +119,12 @@ void usage(const char * execName) {
    exit(1);
 }
 
-void init_openssl()
-{ 
+void init_openssl() { 
   SSL_load_error_strings();	
   OpenSSL_add_ssl_algorithms();
 }
 
-SSL_CTX *create_context()
-{
+SSL_CTX *create_context() {
   const SSL_METHOD *method;
   SSL_CTX *ctx;
 
@@ -140,17 +138,18 @@ SSL_CTX *create_context()
   return ctx;
 }
 
-void configure_context(SSL_CTX *ctx)
-{
+void configure_context(SSL_CTX *ctx) {
   SSL_CTX_set_ecdh_auto(ctx, 1);
 
   /* Set the key and cert */
   if (SSL_CTX_use_certificate_file(ctx, cert_file, SSL_FILETYPE_PEM) <= 0) {
     ERR_print_errors_fp(stderr);
+    fprintf(stderr, "Exit at line %d",  __LINE__);
     exit(1);
   }
   if (SSL_CTX_use_PrivateKey_file(ctx, key_file, SSL_FILETYPE_PEM) <= 0 ) {
     ERR_print_errors_fp(stderr);
+    fprintf(stderr, "Exit at line %d",  __LINE__);
     exit(1);
   }
 }
@@ -688,6 +687,8 @@ void web_1x1png(int http_Socket[], size_t http_SocketSize,
   time_t     now;
   struct tm *tm_now;
   char secure = ' ';
+  int err;
+  char error_buffer[ERR_BUF_SIZE];
 
   // Allocate memory for the poll(2) array.
   desc = malloc(descSize * sizeof(struct pollfd));
@@ -696,6 +697,7 @@ void web_1x1png(int http_Socket[], size_t http_SocketSize,
              "(line %d): ERROR - %s.\n",
              __LINE__,
              strerror( ENOMEM ) );
+    fprintf(stderr, "Exit at line %d",  __LINE__);
     exit(1);
   }
   // Initialize the poll(2) array, merges the two socket arrays
@@ -707,6 +709,7 @@ void web_1x1png(int http_Socket[], size_t http_SocketSize,
   }
 
   // Initialise SSL
+  ERR_load_crypto_strings();
   SSL_CTX *ctx;
   init_openssl();
   ctx = create_context();
@@ -745,7 +748,7 @@ void web_1x1png(int http_Socket[], size_t http_SocketSize,
       // Obtain current time
       time(&now);
       tm_now = gmtime(&now);
-      strftime(date, 256, "%a,%e %b %Y %I:%M:%S GMT", tm_now);
+      strftime(date, 256, "%a,%e %b %Y %H:%M:%S GMT", tm_now);
       strftime(time_str, 32, "%s.000", tm_now);
 
        // Determine if this is an HTTP or HTTPS request
@@ -818,6 +821,17 @@ void web_1x1png(int http_Socket[], size_t http_SocketSize,
                    sizeof(servBfr),
                    NI_NUMERICHOST | NI_NUMERICSERV);
         ssl = SSL_new(ctx);
+        if (ssl == NULL) {
+          while (err = ERR_get_error()) {
+            ERR_error_string_n(err, error_buffer, ERR_BUF_SIZE);
+            fprintf(stderr, "SSL_New error: %s\n", error_buffer);
+          }
+          // ERR_print_errors_fp(stderr);
+          SSL_shutdown(ssl);
+          SSL_free(ssl);
+          CHECK(close(newSckt));
+          continue;
+        }
         SSL_set_fd(ssl, newSckt);
 
         secure = 's';
@@ -825,20 +839,32 @@ void web_1x1png(int http_Socket[], size_t http_SocketSize,
           verbose_info(newSckt, sadr, sadrLen);
         }
 
-        if(verbose) {
-          fprintf(stderr,"SSL Accept\n");
-        }
-        if (SSL_accept(ssl) <= 0) {
-           ERR_print_errors_fp(stderr);
-           exit(1);
+        err = SSL_accept(ssl);
+        if (err <= 0) {
+          while (err = ERR_get_error()) {
+            ERR_error_string_n(err, error_buffer, ERR_BUF_SIZE);
+            fprintf(stderr, "SSL Accept error: %s\n", error_buffer);
+          }
+          // ERR_print_errors_fp(stderr);
+          SSL_shutdown(ssl);
+          SSL_free(ssl);
+          CHECK(close(newSckt));
+          continue;
         }
 
         // Read some headers, mainly to avoid responding too quickly to the client
         // Don't really care what is in there as we are not parsing them
         count = SSL_read(ssl, buffer, 1500);
         if (count <= 0) {
-           ERR_print_errors_fp(stderr);
-           exit(1);
+          while (err = ERR_get_error()) {
+            ERR_error_string_n(err, error_buffer, ERR_BUF_SIZE);
+            fprintf(stderr, "SSL Read error: %s\n", error_buffer);
+          }
+          // ERR_print_errors_fp(stderr);
+          SSL_shutdown(ssl);
+          SSL_free(ssl);
+          CHECK(close(newSckt));
+          continue;
         }
         
         // write HTTP headers
@@ -849,8 +875,14 @@ void web_1x1png(int http_Socket[], size_t http_SocketSize,
 
         count = SSL_write(ssl, buffer, outBytes);
         if (count <= 0) {
-           ERR_print_errors_fp(stderr);
-           exit(1);
+          while (err = ERR_get_error()) {
+            ERR_error_string_n(err, error_buffer, ERR_BUF_SIZE);
+            fprintf(stderr, "SSL Write error: %s\n", error_buffer);
+          }
+          SSL_shutdown(ssl);
+          SSL_free(ssl);
+          CHECK(close(newSckt));
+          continue;
         }
         count = outBytes;
         get_png(buffer+count, &outBytes);
@@ -863,10 +895,15 @@ void web_1x1png(int http_Socket[], size_t http_SocketSize,
           fprintf(stderr,"PNG write count: %ld\n", count);
         }
         if (count <= 0) {
-           ERR_print_errors_fp(stderr);
-           exit(1);
+          while (err = ERR_get_error()) {
+            ERR_error_string_n(err, error_buffer, ERR_BUF_SIZE);
+            fprintf(stderr, "SSL Write error: %s\n", error_buffer);
+          }
+          SSL_shutdown(ssl);
+          SSL_free(ssl);
+          CHECK(close(newSckt));
+          continue;
         }
-
         SSL_shutdown(ssl);
         SSL_free(ssl);
         CHECK(close(newSckt));
@@ -1102,6 +1139,7 @@ int main(int argc, char *argv[])
   // Open TCP sockerts for both HTTP and HTTPS port, for each of IPv4 & IPv6
   if ((openSocket(http_port, http_Socket, &http_SocketSize) < 0) ||
       (openSocket(https_port, https_Socket, &https_SocketSize) < 0)) {
+    fprintf(stderr, "Exit at line %d",  __LINE__);
     exit(1);
   }
 
