@@ -8,4 +8,4 @@ KEY_FILE=/usr/local/etc/nginx/letsencrypt/wild-n@cc@.dotnxdomain.net.key
 BINARY=/usr/local/bin/web-1x1
 
 ulimit -c unlimited
-exec ${BINARY} -c ${CERT_FILE} -k ${KEY_FILE} -l /var/named/var/log/queries/queries-n@cc@-%F.log -p ${HTTP_PORT} -s ${HTTPS_PORT}
+exec ${BINARY} -c ${CERT_FILE} -k ${KEY_FILE} -l /var/log/httpd-access-n@cc@-%F.log -p ${HTTP_PORT} -s ${HTTPS_PORT}
