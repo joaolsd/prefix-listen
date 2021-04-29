@@ -7,9 +7,9 @@ Type=exec
 PIDFile=/var/run/web-1x1.pid
 #ExecStartPre=
 ExecStart=/sbin/start-stop-daemon --start  --background \
-     --make-pidfile --pidfile /var/run/web-1x1.pid --exec /usr/local/bin/run-web-1x1.sh
+     --make-pidfile --pidfile /run/web-1x1.pid --exec /usr/local/bin/run-web-1x1.sh
 #ExecReload=
-ExecStop=/sbin/start-stop-daemon --stop --pidfile /var/run/web-1x1.pid
+ExecStop=/sbin/start-stop-daemon --stop --pidfile /run/web-1x1.pid
 
 [Install]
 WantedBy=multi-user.target
