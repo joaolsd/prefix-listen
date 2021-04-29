@@ -6,6 +6,8 @@
 #include <time.h>
 #include <netdb.h>
 #include <sys/types.h> 
+#include <sys/stat.h>
+#include <fcntl.h>
 #include <sys/socket.h>
 #include <sys/ioctl.h>
 #include <net/if.h>
@@ -63,7 +65,7 @@
 #define MAXCONNQLEN  1024           // Max # of connection requests to queue
 #define MAX_HTTP_SOCKETS  2         // One HTTP socket for IPv4 and one for IPv6
 #define MAX_HTTPS_SOCKETS  2        // One HTTPS socket for IPv4 and one for IPv6
-#define CLI_OPTS    "a:b:c:k:p:s:v" // Command line options
+#define CLI_OPTS    "a:b:c:k:l:p:s:v" // Command line options
 #define INVALID_DESC -1             // Invalid file descriptor
 
 // Handy boolean type
@@ -84,6 +86,11 @@ char *srv_ipv6_addr;
 char *cert_file = "cert.pem";
 char *key_file  = "key.pem";
 
+// Log file stuff
+time_t  loglast;
+int     logfd;
+char *log_path;
+
 // Function prototypes
 int sendto_from(int socket, void *buffer, size_t bufferLen, int flags,
 	       struct sockaddr *clientAddr, socklen_t *clientLen,
@@ -100,7 +107,7 @@ void get_png(char *buffer, int *length);
 
 void verbose_info(int socket, struct sockaddr *sadr, socklen_t sadrLen);
 
-void log_write(char *date, char secure, char *timestamp);
+void log_write(char *date, char secure, time_t now);
 
 // Macro to terminate the program if a system call error occurs,
 // printing errno before exiting
@@ -115,7 +122,7 @@ void log_write(char *date, char secure, char *timestamp);
 
 // Usage message
 void usage(const char * execName) {
-   fprintf( stderr, "Usage: %s [-v] [-a IPv4 address] [-b IPv6 address|all] [-c cert_file] [-k key_file] [-p <http_port>] [-s <https_port]\n", execName );
+   fprintf( stderr, "Usage: %s [-v] [-a IPv4 address] [-b IPv6 address|all] [-c cert_file] [-k key_file] [-l logpath] [-p <http_port>] [-s <https_port]\n", execName );
    exit(1);
 }
 
@@ -683,7 +690,6 @@ void web_1x1png(int http_Socket[], size_t http_SocketSize,
   char       buffer[1500];
   int        outBytes;
   char       date[256];
-  char       time_str[32];
   time_t     now;
   struct tm *tm_now;
   char secure = ' ';
@@ -747,9 +753,8 @@ void web_1x1png(int http_Socket[], size_t http_SocketSize,
 
       // Obtain current time
       time(&now);
-      tm_now = gmtime(&now);
+      struct tm *tm_now = gmtime(&now);
       strftime(date, 256, "%a,%e %b %Y %H:%M:%S GMT", tm_now);
-      strftime(time_str, 32, "%s.000", tm_now);
 
        // Determine if this is an HTTP or HTTPS request
       if (idx < http_SocketSize) { // Low index -> HTTP per merge above
@@ -908,7 +913,7 @@ void web_1x1png(int http_Socket[], size_t http_SocketSize,
         SSL_free(ssl);
         CHECK(close(newSckt));
       } // End HTTPS
-      log_write(date, secure, time_str);
+      log_write(date, secure, now);
       desc[idx].revents = 0;   /* Clear the returned poll events. */
     }  // End FOR each socket descriptor.
   }  // End WHILE forever.
@@ -953,10 +958,30 @@ void get_png(char *buffer, int *len) {
   *len = sizeof(png);
 }
 /****************************************************************************************************/
-void log_write(char *date, char secure, char *timestamp) {
-  fprintf(stdout, \
+int openlog(time_t t) {
+  static int interval = 86400;
+
+  if (logfd < 0 || (t % interval < loglast % interval)) {
+    close(logfd);
+    char path[_POSIX_PATH_MAX];
+
+    time_t tzero = t - t % interval;
+    strftime(path, _POSIX_PATH_MAX, log_path, gmtime(&tzero));
+    logfd = open(path, O_CREAT | O_WRONLY | O_APPEND, 0644);
+  }
+  loglast = t;
+
+  return logfd > 0 ? logfd : 0;
+}
+/****************************************************************************************************/
+void log_write(char *date, char secure, time_t now) { 
+  char time_str[32];
+
+  strftime(time_str, 32, "%s.000", gmtime(&now));
+  
+  dprintf(openlog(now), \
     "%s %s [%s] \"GET something HTTP/1.1\" 200 68 \"-\" \"Some web browser\" \"Some TLS version\" 0.0000 http%c %s some-URL\n",\
-    server_hostname, hostBfr, date, secure, timestamp);
+    server_hostname, hostBfr, date, secure, time_str);
 }
 /****************************************************************************************************/
 void verbose_info(int socket, struct sockaddr *sadr, socklen_t sadrLen) {
@@ -1117,6 +1142,9 @@ int main(int argc, char *argv[])
       case 'k': // TLS Key file
         key_file = optarg;
         break;
+      case 'l': // Log file
+        log_path = optarg;
+        break;
       case 'p': // HTTP port
         http_port = optarg;
         break;
@@ -1147,6 +1175,8 @@ int main(int argc, char *argv[])
   if (gethostname(server_hostname, NI_MAXHOST)) {
     strcpy(server_hostname, "no.server.name"); // Could not get hostname
   }
+
+  openlog(time(NULL));
 
   // Run the "web" server.
   if ((http_SocketSize > 0) || (https_SocketSize > 0)) {
