@@ -961,13 +961,23 @@ void get_png(char *buffer, int *len) {
 int openlog(time_t t) {
   static int interval = 86400;
 
-  if (logfd < 0 || (t % interval < loglast % interval)) {
-    close(logfd);
+  printf("Openlog: logfd %d, t: %d, loglast: %d\n", logfd, t, loglast);
+  printf("openlog if: t/interval: %d, loglast/interval: %d\n", t % interval, loglast % interval);
+  if (logfd <= 0 || (t % interval < loglast % interval)) {
+    if (logfd != 0) {
+      close(logfd);
+    }
     char path[_POSIX_PATH_MAX];
 
     time_t tzero = t - t % interval;
     strftime(path, _POSIX_PATH_MAX, log_path, gmtime(&tzero));
+    printf("Opening log file: %s\n", path);
     logfd = open(path, O_CREAT | O_WRONLY | O_APPEND, 0644);
+    if (logfd < 0) {
+      printf("Could not open log file: %s\nerror: %s", path, strerror(errno));
+    } else {
+      printf("logfd = %d\n", logfd);
+    }
   }
   loglast = t;
 
@@ -1176,6 +1186,8 @@ int main(int argc, char *argv[])
     strcpy(server_hostname, "no.server.name"); // Could not get hostname
   }
 
+  logfd = 0;
+  loglast = 0;
   openlog(time(NULL));
 
   // Run the "web" server.
