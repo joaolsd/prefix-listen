@@ -24,7 +24,7 @@ test-server: test-server.c
 udp_server: udp_server.c
 	gcc -c udp_server.c
 
-config: check-env ${WEB-1x1_SERVIVE_TEMPLATE}
+config: check-env ${WEB-1x1_RUN_TEMPLATE}
 	@echo "making $(HOST)"
 	sed -e "s/@cc@/$(HOST)/g" < ${WEB-1x1_RUN_TEMPLATE} > run-web-1x1.sh
 	
