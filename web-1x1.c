@@ -19,6 +19,7 @@
 #include <openssl/ssl.h>
 #include <openssl/err.h>
 #include <sys/uio.h>
+#include <signal.h>
 
 #ifdef __linux__
 #  if defined IPV6_RECVPKTINFO
@@ -41,9 +42,9 @@
 #endif
 
 /*
- *	Linux uses IPV6_RECVPKTINFO for the setsockopt() call,
- *	and IPV6_PKTINFO for sendmsg() and recvmsg()
- *	Others use IPV6_PKTINFO for all calls.
+ *  Linux uses IPV6_RECVPKTINFO for the setsockopt() call,
+ *  and IPV6_PKTINFO for sendmsg() and recvmsg()
+ *  Others use IPV6_PKTINFO for all calls.
  */
 #ifdef IPV6_PKTINFO
 #ifdef __linux__
@@ -82,6 +83,8 @@ boolean     verbose = false; // Verbose mode?
 char *srv_ipv4_addr;
 char *srv_ipv6_addr;
 
+sig_atomic_t alarm_went_off = 0;
+
 // crypto material files
 char *cert_file = "cert.pem";
 char *key_file  = "key.pem";
@@ -89,12 +92,13 @@ char *key_file  = "key.pem";
 // Log file stuff
 time_t  loglast;
 int     logfd;
+int     err_logfd;
 char *log_path;
 
 // Function prototypes
 int sendto_from(int socket, void *buffer, size_t bufferLen, int flags,
-	       struct sockaddr *clientAddr, socklen_t *clientLen,
-	       struct sockaddr *srvAddr, socklen_t *srvLen, uint *ifindex);
+         struct sockaddr *clientAddr, socklen_t *clientLen,
+         struct sockaddr *srvAddr, socklen_t *srvLen, uint *ifindex);
   
 int  openSocket(const char *service, int desc[], size_t *descSize);
 
@@ -108,6 +112,7 @@ void get_png(char *buffer, int *length);
 void verbose_info(int socket, struct sockaddr *sadr, socklen_t sadrLen);
 
 void log_write(char *date, char secure, time_t now);
+void err_log_write(char *date, char secure, time_t now, char *err_message);
 
 // Macro to terminate the program if a system call error occurs,
 // printing errno before exiting
@@ -125,9 +130,13 @@ void usage(const char * execName) {
    fprintf( stderr, "Usage: %s [-v] [-a IPv4 address] [-b IPv6 address|all] [-c cert_file] [-k key_file] [-l logpath] [-p <http_port>] [-s <https_port]\n", execName );
    exit(1);
 }
+void sighandler () {
+  alarm_went_off = 1;
+  return; // empty handler
+}
 
 void init_openssl() { 
-  SSL_load_error_strings();	
+  SSL_load_error_strings();
   OpenSSL_add_ssl_algorithms();
 }
 
@@ -166,123 +175,123 @@ void configure_context(SSL_CTX *ctx) {
  * which the message arrived
  */
 int recvfrom_to(int socket, void *buffer, size_t bufferLen, int flags,
-	       struct sockaddr *client, socklen_t *clientLen,
-	       struct sockaddr *srv, socklen_t *srvLen, uint *ifindex)
+         struct sockaddr *client, socklen_t *clientLen,
+         struct sockaddr *srv, socklen_t *srvLen, uint *ifindex)
 {
-	struct msghdr msgheader;
-	struct cmsghdr *control_msg;
-	struct iovec msg_iov;
-	char control_buf[256];
-	int err;
-	struct sockaddr_storage srcAddr;
-	socklen_t srcLen = sizeof(srcAddr);
+  struct msghdr msgheader;
+  struct cmsghdr *control_msg;
+  struct iovec msg_iov;
+  char control_buf[256];
+  int err;
+  struct sockaddr_storage srcAddr;
+  socklen_t srcLen = sizeof(srcAddr);
 
   // In order to be able to get the server side address at which we got the 
   // message we need proper support in recvmsg
 #if !defined(IP_PKTINFO) && !defined(IP_RECVDSTADDR) && !defined (IPV6_PKTINFO)
-	srv = NULL:
+  srv = NULL:
 #endif
 
   // Get socket info
   if (getsockname(socket, (struct sockaddr *)&srcAddr, &srcLen) < 0) {
-		return -1;
-	}
+    return -1;
+  }
 
-	/*
-	 *	Initialize the server (srv) address.  It may be INADDR_ANY here,
-	 *	with a more specific address given by recvmsg(), below.
-	 */
-	if (srcAddr.ss_family == AF_INET) {
+  /*
+   *  Initialize the server (srv) address.  It may be INADDR_ANY here,
+   *  with a more specific address given by recvmsg(), below.
+   */
+  if (srcAddr.ss_family == AF_INET) {
 #if !defined(IP_PKTINFO) && !defined(IP_RECVDSTADDR)
-		return recvfrom(socket, buffer, bufferLen, flags, client, clientLen);
+    return recvfrom(socket, buffer, bufferLen, flags, client, clientLen);
 #else
-		struct sockaddr_in *dst = (struct sockaddr_in *) srv;
-		struct sockaddr_in *src = (struct sockaddr_in *) &srcAddr;
-		
-		if (*srvLen < sizeof(*dst)) {
-			errno = EINVAL;
-			return -1;
-		}
-		*srvLen = sizeof(*dst);
-		*dst = *src;
+    struct sockaddr_in *dst = (struct sockaddr_in *) srv;
+    struct sockaddr_in *src = (struct sockaddr_in *) &srcAddr;
+    
+    if (*srvLen < sizeof(*dst)) {
+      errno = EINVAL;
+      return -1;
+    }
+    *srvLen = sizeof(*dst);
+    *dst = *src;
 #endif
-	}	else if (srcAddr.ss_family == AF_INET6) {
+  } else if (srcAddr.ss_family == AF_INET6) {
 #if !defined(IPV6_PKTINFO)
-		return recvfrom(socket, buffer, bufferLen, flags, client, clientLen);
+    return recvfrom(socket, buffer, bufferLen, flags, client, clientLen);
 #else
-		struct sockaddr_in6 *dst = (struct sockaddr_in6 *) srv;
-		struct sockaddr_in6 *src = (struct sockaddr_in6 *) &srcAddr;
-		
-		if (*srvLen < sizeof(*dst)) {
-			errno = EINVAL;
-			return -1;
-		}
-		*srvLen = sizeof(*dst);
-		*dst = *src;
+    struct sockaddr_in6 *dst = (struct sockaddr_in6 *) srv;
+    struct sockaddr_in6 *src = (struct sockaddr_in6 *) &srcAddr;
+    
+    if (*srvLen < sizeof(*dst)) {
+      errno = EINVAL;
+      return -1;
+    }
+    *srvLen = sizeof(*dst);
+    *dst = *src;
 #endif
-	}
+  }
 
-	// Set up iov and msgheader
-	memset(&msgheader, 0, sizeof(struct msghdr));
-	msg_iov.iov_base = buffer;
-	msg_iov.iov_len  = bufferLen;
-	msgheader.msg_control = control_buf;
-	msgheader.msg_controllen = sizeof(control_buf);
-	msgheader.msg_name = client;
-	msgheader.msg_namelen = clientLen ? *clientLen : 0;
-	msgheader.msg_iov  = &msg_iov;
-	msgheader.msg_iovlen = 1;
-	msgheader.msg_flags = 0;
+  // Set up iov and msgheader
+  memset(&msgheader, 0, sizeof(struct msghdr));
+  msg_iov.iov_base = buffer;
+  msg_iov.iov_len  = bufferLen;
+  msgheader.msg_control = control_buf;
+  msgheader.msg_controllen = sizeof(control_buf);
+  msgheader.msg_name = client;
+  msgheader.msg_namelen = clientLen ? *clientLen : 0;
+  msgheader.msg_iov  = &msg_iov;
+  msgheader.msg_iovlen = 1;
+  msgheader.msg_flags = 0;
 
-	// Receive a packet
-	if ((err = recvmsg(socket, &msgheader, flags)) < 0) {
-		return err;
-	}
+  // Receive a packet
+  if ((err = recvmsg(socket, &msgheader, flags)) < 0) {
+    return err;
+  }
 
-	if (clientLen) *clientLen = msgheader.msg_namelen;
+  if (clientLen) *clientLen = msgheader.msg_namelen;
 
   control_msg = CMSG_FIRSTHDR(&msgheader);
-	// Process ancillary data  received in msgheader - cmsg(3)
-	for (control_msg;
-	     control_msg != NULL;
-	     control_msg = CMSG_NXTHDR(&msgheader,control_msg)) {
+  // Process ancillary data  received in msgheader - cmsg(3)
+  for (control_msg;
+       control_msg != NULL;
+       control_msg = CMSG_NXTHDR(&msgheader,control_msg)) {
 #ifdef IP_PKTINFO
-		if ((control_msg->cmsg_level == SOL_IP) &&
-		    (control_msg->cmsg_type == IP_PKTINFO)) {
+    if ((control_msg->cmsg_level == SOL_IP) &&
+        (control_msg->cmsg_type == IP_PKTINFO)) {
       fprintf(stderr, "RECVFROM_TO IPv4\n");
       struct in_pktinfo *i =
         (struct in_pktinfo *) CMSG_DATA(control_msg);
-			((struct sockaddr_in *)srv)->sin_addr = i->ipi_addr;
-			*srvLen = sizeof(struct sockaddr_in);
-			break;
-		}
+      ((struct sockaddr_in *)srv)->sin_addr = i->ipi_addr;
+      *srvLen = sizeof(struct sockaddr_in);
+      break;
+    }
 #endif
 
 #ifdef IP_RECVDSTADDR
-		if ((control_msg->cmsg_level == IPPROTO_IP) &&
-		    (control_msg->cmsg_type == IP_RECVDSTADDR)) {
+    if ((control_msg->cmsg_level == IPPROTO_IP) &&
+        (control_msg->cmsg_type == IP_RECVDSTADDR)) {
       fprintf(stderr, "RECVFROM_TO IPv4 IP_RECVDTSADDR\n");
-			struct in_addr *i = (struct in_addr *) CMSG_DATA(control_msg);
-			((struct sockaddr_in *)srv)->sin_addr = *i;
-			*srvLen = sizeof(struct sockaddr_in);
-			break;
-		}
+      struct in_addr *i = (struct in_addr *) CMSG_DATA(control_msg);
+      ((struct sockaddr_in *)srv)->sin_addr = *i;
+      *srvLen = sizeof(struct sockaddr_in);
+      break;
+    }
 #endif
 
 #ifdef IPV6_PKTINFO
-		if ((control_msg->cmsg_level == IPPROTO_IPV6) &&
-		    (control_msg->cmsg_type == IPV6_PKTINFO)) {
+    if ((control_msg->cmsg_level == IPPROTO_IPV6) &&
+        (control_msg->cmsg_type == IPV6_PKTINFO)) {
       fprintf(stderr, "RECVFROM_TO IPv6\n");
-			struct in6_pktinfo *i =
-			  (struct in6_pktinfo *) CMSG_DATA(control_msg);
-			((struct sockaddr_in6 *)srv)->sin6_addr = i->ipi6_addr;
+      struct in6_pktinfo *i =
+        (struct in6_pktinfo *) CMSG_DATA(control_msg);
+      ((struct sockaddr_in6 *)srv)->sin6_addr = i->ipi6_addr;
       *ifindex = i->ipi6_ifindex;
-			*srvLen = sizeof(struct sockaddr_in6);
-			break;
-		}
+      *srvLen = sizeof(struct sockaddr_in6);
+      break;
+    }
 #endif
-	}
-	return err;
+  }
+  return err;
 }
 /*
  * Add Server Source Address to outgoing packet so it matches the incoming (server/local) address
@@ -290,7 +299,7 @@ int recvfrom_to(int socket, void *buffer, size_t bufferLen, int flags,
  */
 void addSrcAddr(struct msghdr* msgheader, void* control_buf, const struct sockaddr* srcAddr, uint ifindex)
 {
-	struct cmsghdr *control_msg = NULL;
+  struct cmsghdr *control_msg = NULL;
 
   if(((struct sockaddr_in*) srcAddr)->sin_family == AF_INET6) {
   #ifdef IPV6_PKTINFO
@@ -352,41 +361,41 @@ void addSrcAddr(struct msghdr* msgheader, void* control_buf, const struct sockad
  * packet
  */
 int sendto_from(int socket, void *buffer, size_t bufferLen, int flags,
-	       struct sockaddr *clientAddr, socklen_t *clientLen,
-	       struct sockaddr *srvAddr, socklen_t *srvLen, uint *ifindex)
+         struct sockaddr *clientAddr, socklen_t *clientLen,
+         struct sockaddr *srvAddr, socklen_t *srvLen, uint *ifindex)
 {
-	struct msghdr msgheader;
-	struct cmsghdr *control_msg;
-	struct iovec msg_iov;
-	char control_buf[256];
+  struct msghdr msgheader;
+  struct cmsghdr *control_msg;
+  struct iovec msg_iov;
+  char control_buf[256];
   int err, count;
 
-	// Set up iov and msgheader
-	memset(&msgheader, 0, sizeof(struct msghdr));
-	msg_iov.iov_base = buffer;
-	msg_iov.iov_len  = bufferLen;
-	msgheader.msg_control = control_buf;
-	msgheader.msg_controllen = sizeof(control_buf);
-	msgheader.msg_name = clientAddr;
-	msgheader.msg_namelen = clientLen ? *clientLen : 0;
-	msgheader.msg_iov  = &msg_iov;
-	msgheader.msg_iovlen = 1;
-	msgheader.msg_flags = 0;
+  // Set up iov and msgheader
+  memset(&msgheader, 0, sizeof(struct msghdr));
+  msg_iov.iov_base = buffer;
+  msg_iov.iov_len  = bufferLen;
+  msgheader.msg_control = control_buf;
+  msgheader.msg_controllen = sizeof(control_buf);
+  msgheader.msg_name = clientAddr;
+  msgheader.msg_namelen = clientLen ? *clientLen : 0;
+  msgheader.msg_iov  = &msg_iov;
+  msgheader.msg_iovlen = 1;
+  msgheader.msg_flags = 0;
 
   // In order to be able to get the server side address at which we got the message
   // we need proper support in recvmsg
 #if !defined(IP_PKTINFO) && !defined(IP_RECVDSTADDR) && !defined (IPV6_PKTINFO)
-	srvAddr = NULL:
+  srvAddr = NULL:
 #endif
 
-	// IPv4 
-	if (srvAddr->sa_family == AF_INET) {
+  // IPv4 
+  if (srvAddr->sa_family == AF_INET) {
 #if !defined(IP_PKTINFO) && !defined(IP_RECVDSTADDR)
-		return sendto(socket, buffer, bufferLen, 0, clientAddr, clientLen);
+    return sendto(socket, buffer, bufferLen, 0, clientAddr, clientLen);
 #else
     // struct sockaddr_in *from = (struct sockaddr_in *) srv;
     // struct sockaddr_in *to = (struct sockaddr_in *) &srcAddr;
-		
+    
     // addCMsgSrcAddr(&msgh, cbuf, p->d_anyLocal.get_ptr(), 0);
     
     // if (*srvLen < sizeof(*dst)) {
@@ -396,16 +405,16 @@ int sendto_from(int socket, void *buffer, size_t bufferLen, int flags,
     // *srvLen = sizeof(*dst);
     // *dst = *src;
 #endif
-	}	else if (srvAddr->sa_family == AF_INET6) { //IPv6
+  }  else if (srvAddr->sa_family == AF_INET6) { //IPv6
 #if !defined(IPV6_PKTINFO)
-		return sendto(socket, buffer, bufferLen, 0, clientAddr, clientLen);
+    return sendto(socket, buffer, bufferLen, 0, clientAddr, clientLen);
 #else
     // Add IPv6 address to socket to send from specific address
     addSrcAddr(&msgheader, control_buf, srvAddr, *ifindex);
 #endif
-	}
-	// Send a packet
-	count = sendmsg(socket, &msgheader, flags);  
+  }
+  // Send a packet
+  count = sendmsg(socket, &msgheader, flags);  
   // err = del_ifaddress(srvAddr, *ifindex);
   return count;
 }
@@ -696,6 +705,8 @@ void web_1x1png(int http_Socket[], size_t http_SocketSize,
   int err;
   char error_buffer[ERR_BUF_SIZE];
 
+  struct sigaction sig_action;
+  
   // Allocate memory for the poll(2) array.
   desc = malloc(descSize * sizeof(struct pollfd));
   if ( desc == NULL ) {
@@ -813,10 +824,14 @@ void web_1x1png(int http_Socket[], size_t http_SocketSize,
         sadrLen = sizeof(sockStor);
         sadr    = (struct sockaddr*) &sockStor;
         
+        secure = 's';
+        
         if (verbose) {
           fprintf(stderr, "SSL Connection\n");
         }
+
         CHECK(newSckt = accept(desc[idx].fd, sadr, &sadrLen));
+        fcntl(newSckt, F_SETFL, O_NONBLOCK);
         // Client address-specific fields
         getnameinfo(sadr,
                    sadrLen,
@@ -830,8 +845,9 @@ void web_1x1png(int http_Socket[], size_t http_SocketSize,
           while (err = ERR_get_error()) {
             ERR_error_string_n(err, error_buffer, ERR_BUF_SIZE);
             fprintf(stderr, "SSL_New error: %s\n", error_buffer);
+            err_log_write(date, secure, now, error_buffer);
           }
-          // ERR_print_errors_fp(stderr);
+
           SSL_shutdown(ssl);
           SSL_free(ssl);
           CHECK(close(newSckt));
@@ -839,16 +855,45 @@ void web_1x1png(int http_Socket[], size_t http_SocketSize,
         }
         SSL_set_fd(ssl, newSckt);
 
-        secure = 's';
         if (verbose) {
           verbose_info(newSckt, sadr, sadrLen);
         }
 
-        err = SSL_accept(ssl);
+        sig_action.sa_sigaction = NULL;
+        sig_action.sa_handler = sighandler;
+        sigfillset(&sig_action.sa_mask);
+        sig_action.sa_flags = SA_NODEFER | SA_RESTART;
+        sigaction(SIGALRM, &sig_action, NULL);
+        signal(SIGPIPE, SIG_IGN);
+        ualarm(500000, 0); // Alarm in 2 secs
+
+        // keep attempting if needed
+        while( (err = SSL_accept(ssl)) != 1  ) {
+          if (alarm_went_off) {
+            err_log_write(date, secure, now, "alarm went off");
+            break;
+          }
+          // if (SSL_get_error(ssl, err)==SSL_ERROR_WANT_READ)
+          int ssl_err = SSL_get_error(ssl, err);
+          if (ssl_err ==SSL_ERROR_WANT_READ)
+            continue;
+        } 
+
+        // If we get here, clear connection alarm
+        ualarm(0, 0);
+        if (alarm_went_off) {
+          alarm_went_off = 0;
+          SSL_shutdown(ssl);
+          SSL_free(ssl);
+          CHECK(close(newSckt));
+          continue;
+        }
+
         if (err <= 0) {
           while (err = ERR_get_error()) {
             ERR_error_string_n(err, error_buffer, ERR_BUF_SIZE);
             fprintf(stderr, "SSL Accept error: %s\n", error_buffer);
+            err_log_write(date, secure, now, error_buffer);
           }
           // ERR_print_errors_fp(stderr);
           SSL_shutdown(ssl);
@@ -859,18 +904,18 @@ void web_1x1png(int http_Socket[], size_t http_SocketSize,
 
         // Read some headers, mainly to avoid responding too quickly to the client
         // Don't really care what is in there as we are not parsing them
-        count = SSL_read(ssl, buffer, 1500);
-        if (count <= 0) {
-          while (err = ERR_get_error()) {
-            ERR_error_string_n(err, error_buffer, ERR_BUF_SIZE);
-            fprintf(stderr, "SSL Read error: %s\n", error_buffer);
-          }
-          // ERR_print_errors_fp(stderr);
-          SSL_shutdown(ssl);
-          SSL_free(ssl);
-          CHECK(close(newSckt));
-          continue;
-        }
+        // count = SSL_read(ssl, buffer, 1);
+        // if (count <= 0) {
+        //   while (err = ERR_get_error()) {
+        //     ERR_error_string_n(err, error_buffer, ERR_BUF_SIZE);
+        //     fprintf(stderr, "SSL Read error: %s\n", error_buffer);
+        //   }
+        //   // ERR_print_errors_fp(stderr);
+        //   SSL_shutdown(ssl);
+        //   SSL_free(ssl);
+        //   CHECK(close(newSckt));
+        //   continue;
+        // }
         
         // write HTTP headers
         gen_http_headers(buffer, &outBytes, date);
@@ -957,12 +1002,10 @@ void get_png(char *buffer, int *len) {
   memcpy(buffer, png, sizeof(png));
   *len = sizeof(png);
 }
-/****************************************************************************************************/
+/**HTTPD access log *******************************************************************************/
 int openlog(time_t t) {
   static int interval = 86400;
 
-  printf("Openlog: logfd %d, t: %d, loglast: %d\n", logfd, t, loglast);
-  printf("openlog if: t/interval: %d, loglast/interval: %d\n", t % interval, loglast % interval);
   if (logfd <= 0 || (t % interval < loglast % interval)) {
     if (logfd != 0) {
       close(logfd);
@@ -983,15 +1026,60 @@ int openlog(time_t t) {
 
   return logfd > 0 ? logfd : 0;
 }
-/****************************************************************************************************/
+/*********/
 void log_write(char *date, char secure, time_t now) { 
   char time_str[32];
-
+  char *tls;
   strftime(time_str, 32, "%s.000", gmtime(&now));
   
+  if (secure == 's') {
+    tls = "\"Some TLS version\"";
+  } else {
+    tls = "";
+  }
   dprintf(openlog(now), \
     "%s %s [%s] \"GET something HTTP/1.1\" 200 68 \"-\" \"Some web browser\" \"Some TLS version\" 0.0000 http%c %s some-URL\n",\
     server_hostname, hostBfr, date, secure, time_str);
+}
+/*** HTTPD ERR log ****************************************************************************************/
+int err_openlog(time_t t) {
+  static int err_interval = 86400;
+
+  if (err_logfd <= 0 || (t % err_interval < loglast % err_interval)) {
+    if (err_logfd != 0) {
+      close(err_logfd);
+    }
+    char err_log_path[_POSIX_PATH_MAX];
+    // The line below is going to assume that log_path ends in '.log'
+    int len = strlen(log_path)-4;
+    strncpy(err_log_path, log_path, len);
+    err_log_path[len] = 0;
+    strcat(err_log_path, "-error.log");
+    char path[_POSIX_PATH_MAX];
+    
+    time_t tzero = t - t % err_interval;
+    strftime(path, _POSIX_PATH_MAX, err_log_path, gmtime(&tzero));
+    printf("Opening error log file: %s\n", path);
+    err_logfd = open(path, O_CREAT | O_WRONLY | O_APPEND, 0644);
+    if (err_logfd < 0) {
+      printf("Could not open error log file: %s\nerror: %s", path, strerror(errno));
+    } else {
+      printf("logfd = %d\n", err_logfd);
+    }
+  }
+  loglast = t;
+
+  return err_logfd > 0 ? logfd : 0;
+}
+/*********/
+void err_log_write(char *date, char secure, time_t now, char *message) { 
+  char time_str[32];
+  char *tls;
+  strftime(time_str, 32, "%s.000", gmtime(&now));
+  
+  dprintf(err_openlog(now), \
+    "%s %s [%s] http%c %s %s\n",\
+    server_hostname, hostBfr, date, secure, time_str, message);
 }
 /****************************************************************************************************/
 void verbose_info(int socket, struct sockaddr *sadr, socklen_t sadrLen) {
@@ -1189,6 +1277,7 @@ int main(int argc, char *argv[])
   logfd = 0;
   loglast = 0;
   openlog(time(NULL));
+  err_openlog(time(NULL));
 
   // Run the "web" server.
   if ((http_SocketSize > 0) || (https_SocketSize > 0)) {

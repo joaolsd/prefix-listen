@@ -10,7 +10,7 @@ ifndef HOST
 endif
 
 clean:
-	$(RM) *.o tcp-server test-server udp_server
+	$(RM) *.o tcp-server test-server udp_server web-1x1
 
 web-1x1.o: web-1x1.c
 	gcc $(CFLAGS) -c web-1x1.c -I /usr
