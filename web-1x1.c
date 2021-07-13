@@ -134,6 +134,10 @@ void sighandler () {
   alarm_went_off = 1;
   return; // empty handler
 }
+void sighandler2 () {
+  alarm_went_off = 2;
+  return; // empty handler
+}
 
 void init_openssl() { 
   SSL_load_error_strings();
@@ -864,13 +868,17 @@ void web_1x1png(int http_Socket[], size_t http_SocketSize,
         sigfillset(&sig_action.sa_mask);
         sig_action.sa_flags = SA_NODEFER | SA_RESTART;
         sigaction(SIGALRM, &sig_action, NULL);
-        signal(SIGPIPE, SIG_IGN);
-        ualarm(500000, 0); // Alarm in 2 secs
+        signal(SIGPIPE, sighandler2);
+        ualarm(500000, 0); // Alarm in .5 secs
 
         // keep attempting if needed
         while( (err = SSL_accept(ssl)) != 1  ) {
-          if (alarm_went_off) {
+          if (alarm_went_off == 1) {
             err_log_write(date, secure, now, "alarm went off");
+            break;
+          }
+          if (alarm_went_off == 2) {
+            err_log_write(date, secure, now, "socket closed");
             break;
           }
           // if (SSL_get_error(ssl, err)==SSL_ERROR_WANT_READ)
