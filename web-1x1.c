@@ -803,20 +803,19 @@ void web_1x1png(int http_Socket[], size_t http_SocketSize,
         while (outBytes > 0) {
            do {
               count = write(newSckt, buffer, outBytes);
-           } while ( ( count < 0 ) && ( errno == EINTR ) );
-           CHECK(count);
+           } while ( ( count > 0 ) && ( errno != EINTR ) );
            outBytes -= count;
         }  // End WHILE there is data to send
         
         if (verbose) {
           fprintf(stderr, "Send PNG\n");
         }
+
         get_png(buffer, &outBytes);
         while (outBytes > 0) {
            do {
               count = write(newSckt, buffer, outBytes);
            } while ( ( count < 0 ) && ( errno == EINTR ) );
-           CHECK(count);
            outBytes -= count;
         }  // End WHILE there is data to send
 
@@ -942,13 +941,11 @@ void web_1x1png(int http_Socket[], size_t http_SocketSize,
           CHECK(close(newSckt));
           continue;
         }
-        count = outBytes;
-        get_png(buffer+count, &outBytes);
-        count += outBytes;
+        get_png(buffer, &outBytes);
         if(verbose) {
           fprintf(stderr,"Send PNG\n");
         }
-        count = SSL_write(ssl, buffer, count);
+        count = SSL_write(ssl, buffer, outBytes);
         if (verbose) {
           fprintf(stderr,"PNG write count: %ld\n", count);
         }
