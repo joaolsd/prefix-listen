@@ -973,7 +973,7 @@ void web_1x1png(int http_Socket[], size_t http_SocketSize,
 }
 
 void gen_http_headers(char *buffer, int* len, char *date) {
-  char    *headers[10];
+  char    *headers[11];
   int slen = 0;
   
   headers[0] = "HTTP/1.1 200 OK\r\n";
@@ -986,10 +986,11 @@ void gen_http_headers(char *buffer, int* len, char *date) {
   headers[7] = "Connection: keep-alive\r\n";
   headers[8] = "Access-Control-Allow-Origin: *\r\n";
   headers[9] = "\r\n";
-
+  headers[10] = "\r\n";
+  
   int i;
   // Cat headers together
-  for (i=0; i<10; i++) {
+  for (i=0; i<11; i++) {
     strcpy(buffer+slen, headers[i]);
     slen += strlen(headers[i]);
   }
